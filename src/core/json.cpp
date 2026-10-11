@@ -5,7 +5,7 @@
 #include <cstring>
 #include <xlocale.h>
 
-namespace tt::json {
+namespace uq::json {
 namespace {
 
 const Value kNull;
@@ -246,4 +246,4 @@ void appendQuoted(std::string& out, std::string_view s) {
     out += '"';
 }
 
-}  // namespace tt::json
+}  // namespace uq::json

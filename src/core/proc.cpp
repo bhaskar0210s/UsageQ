@@ -12,7 +12,7 @@
 
 extern char** environ;
 
-namespace tt {
+namespace uq {
 namespace {
 
 int64_t monotonicMs() {
@@ -140,4 +140,4 @@ ProcResult runProcess(const char* path, const std::vector<std::string>& args, st
     return r;
 }
 
-}  // namespace tt
+}  // namespace uq

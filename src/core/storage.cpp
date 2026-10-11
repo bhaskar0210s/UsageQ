@@ -7,7 +7,7 @@
 
 #include "util.hpp"
 
-namespace tt {
+namespace uq {
 
 StorageInfo measureStorage() {
     StorageInfo info;
@@ -43,4 +43,4 @@ StorageInfo measureStorage() {
     return info;
 }
 
-}  // namespace tt
+}  // namespace uq

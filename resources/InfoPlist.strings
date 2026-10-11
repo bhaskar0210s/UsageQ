@@ -1,0 +1,3 @@
+/* Finder shows the app as "Usage?"; files and commands use "UsageQ". */
+CFBundleDisplayName = "Usage?";
+CFBundleName = "Usage?";

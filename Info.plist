@@ -5,15 +5,15 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>TokenTank</string>
+	<string>UsageQ</string>
 	<key>CFBundleIdentifier</key>
-	<string>dev.tokentank.TokenTank</string>
+	<string>dev.usageq.UsageQ</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>TokenTank</string>
+	<string>UsageQ</string>
 	<key>CFBundleDisplayName</key>
-	<string>TokenTank</string>
+	<string>UsageQ</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -24,9 +24,11 @@
 	<string>13.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>LSHasLocalizedDisplayName</key>
+	<true/>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>TokenTank: Claude usage in the menu bar</string>
+	<string>Usage? — Claude usage in the menu bar</string>
 </dict>
 </plist>

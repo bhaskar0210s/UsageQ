@@ -8,7 +8,7 @@
 #include <cstring>
 #include <ctime>
 
-namespace tt {
+namespace uq {
 
 std::string formatUSD(double usd) {
     long long cents = llround(usd * 100);
@@ -157,4 +157,4 @@ std::string modelDisplayName(std::string_view id) {
     return version.empty() ? family : family + " " + version;
 }
 
-}  // namespace tt
+}  // namespace uq

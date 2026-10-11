@@ -11,7 +11,7 @@
 
 #include "pages.hpp"
 
-namespace tt {
+namespace uq {
 
 struct Price;
 
@@ -103,4 +103,4 @@ private:
     bool unpriced_ = false;
 };
 
-}  // namespace tt
+}  // namespace uq

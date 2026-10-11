@@ -8,7 +8,7 @@
 #include "json.hpp"
 #include "util.hpp"
 
-namespace tt {
+namespace uq {
 
 void Engine::refresh(int64_t now, bool measureStorageNow) {
     tzset();  // pick up time zone changes
@@ -62,9 +62,9 @@ void Engine::refresh(int64_t now, bool measureStorageNow) {
     else if (lastError_ == FetchError::BadResponse)
         snap_.notice = "Unexpected response from Claude (HTTP " + std::to_string(lastStatus_) + ")";
     else if (lastError_ == FetchError::RateLimited && !fresh)
-        snap_.notice = "Claude is rate limiting usage checks — retrying later";
+        snap_.notice = "Claude is rate limiting checks";
     else if (lastError_ == FetchError::Network && !fresh)
-        snap_.notice = "Offline — showing the last update";
+        snap_.notice = "Offline";
     else
         snap_.notice.clear();
 
@@ -228,8 +228,8 @@ std::string snapshotText(const Snapshot& s, int64_t now) {
     if (!s.notice.empty()) o += "! " + s.notice + "\n";
     for (const LimitWindow& raw : s.windows) {
         const LimitWindow w = effectiveWindow(raw, now);
-        std::string line = pad(w.title, 15) + pad(formatPercent(std::max(0.0, 100.0 - w.usedPercent)) + " left", 10);
-        if (w.resetsAt) line += pad("refills in " + formatCountdown(w.resetsAt - now), 20);
+        std::string line = pad(w.title, 15) + pad(formatPercent(w.usedPercent) + " used", 10);
+        if (w.resetsAt) line += pad("resets in " + formatCountdown(w.resetsAt - now), 19);
         line += paceText(computePace(w, now), w.isSession);
         line.erase(line.find_last_not_of(' ') + 1);
         o += line + "\n";
@@ -249,4 +249,4 @@ std::string snapshotText(const Snapshot& s, int64_t now) {
     return o;
 }
 
-}  // namespace tt
+}  // namespace uq

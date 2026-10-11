@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace tt {
+namespace uq {
 
 struct StorageInfo {
     bool valid = false;
@@ -13,4 +13,4 @@ struct StorageInfo {
 // the installed CLI versions and its caches. Allocated bytes, like `du`.
 StorageInfo measureStorage();
 
-}  // namespace tt
+}  // namespace uq

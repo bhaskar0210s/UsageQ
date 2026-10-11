@@ -9,7 +9,7 @@
 #include "storage.hpp"
 #include "usage.hpp"
 
-namespace tt {
+namespace uq {
 
 struct Snapshot {
     int64_t updatedAt = 0;              // last successful limits fetch
@@ -50,4 +50,4 @@ const LimitWindow* primaryWindow(const std::vector<LimitWindow>& windows);
 std::string snapshotJSON(const Snapshot& s, int64_t now);
 std::string snapshotText(const Snapshot& s, int64_t now);
 
-}  // namespace tt
+}  // namespace uq

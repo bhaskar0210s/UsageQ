@@ -8,7 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-namespace tt {
+namespace uq {
 
 std::string homeDir() {
     if (const char* h = getenv("HOME"); h && *h) return h;
@@ -120,4 +120,4 @@ int64_t localMidnight(int64_t t, int dayOffset) {
     return int64_t(mktime(&tm));
 }
 
-}  // namespace tt
+}  // namespace uq

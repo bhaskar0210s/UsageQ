@@ -1,65 +1,65 @@
-<h1 align="center">TokenTank</h1>
+<h1 align="center">Usage?</h1>
 
-<p align="center"><b>Tokens? Check the tank.</b><br>
-A tiny macOS menu bar app that shows how much of your <b>Claude</b> usage is left, as fuel gauges, and tells you when you'll run dry.</p>
+<p align="center"><b>How much Claude have I used?</b><br>
+A tiny, native macOS menu bar app for your Claude Code limits and spending.</p>
 
 <p align="center">
-  <img src="docs/menubar-dark.png" width="92" alt="TokenTank in the menu bar: a fuel gauge and 62%">
+  <img src="docs/menubar-dark.png" width="84" alt="Usage? in the menu bar: two small meters and 38%">
   &nbsp;
-  <img src="docs/menubar-light.png" width="92" alt="TokenTank in a light menu bar">
+  <img src="docs/menubar-light.png" width="84" alt="Usage? in a light menu bar">
 </p>
 
 <p align="center">
-  <img src="docs/menu-dark.png" width="320" alt="TokenTank menu, dark">
+  <img src="docs/menu-dark.png" width="320" alt="Usage? menu, dark">
   &nbsp;&nbsp;
-  <img src="docs/menu-light.png" width="320" alt="TokenTank menu, light">
+  <img src="docs/menu-light.png" width="320" alt="Usage? menu, light">
 </p>
 
 <p align="center"><sub>Screenshots use made-up demo data.</sub></p>
 
-## What you get
+## What you see
 
-- **One glance.** The menu bar shows a fuel gauge and how much of your current Claude session is left.
-- **A straight answer.** The top of the menu says *All good*, or *Session runs dry ~5:02 PM at this pace*, so you never have to work out burn rates yourself.
-- **Every limit as a gauge.** Session (5-hour), weekly, and model-specific weekly limits (Opus, Fable, ...), each with what's left, when it refills, and whether it lasts until then.
-- **What it costs.** Today, this week, last week and the last 30 days, in dollars and tokens, estimated at API prices from your local Claude Code logs.
-- **30-day history.** Cost and token bars for every day. Hover a day to see its totals and its top two models.
-- **Storage.** How much disk Claude Code uses: logs, history, plugins and installed versions.
-- **Built for agents too.** `tokentank --json` prints the same data for scripts and coding agents.
-- **Tiny.** Native C++ with a thin AppKit shell. About 10 MB of memory; no Electron, no web views, no background daemons.
-- **Zero setup.** It reuses your Claude Code login, read-only. No API keys, no accounts, no telemetry.
+- **Your limits as meters.** Session and weekly limits (including model-specific ones such as *Fable weekly*) show how much is used, with marks at 50%, 75% and 100%.
+- **Pace on the meter itself.** A thin marker shows the *even pace*: where you'd be with steady use. The gap between it and your usage is your reserve (green) or how far over pace you are (orange).
+- **Plain answers.** *12% in reserve*, *At this pace: lasts until reset*, or *100% by Wed 9:14 AM*. Resets are shown as clock times, *Resets 6:15 PM · in 2h 29m*.
+- **Spending.** Cost and tokens for Today, This week, Last week and the last 30 days, estimated at API prices from your local Claude Code logs.
+- **30 days at a glance.** Daily cost and token bars. Hover a day to see its totals and its top two models.
+- **The essentials, nothing else.** Your plan, the disk space Claude Code uses, Settings and Quit, all in one footer.
+- **In the menu bar.** Two tiny meters (session and weekly) and how much of your session you've used.
 
 ## Install
 
-Needs macOS 13 or later, the Xcode Command Line Tools (`xcode-select --install`), and Claude Code signed in at least once.
+You need macOS 13 or later, the Xcode Command Line Tools (`xcode-select --install`), and to have signed in to Claude Code at least once.
 
 ```sh
-git clone https://github.com/bhaskar0210s/TokenTank.git
-cd TokenTank
+git clone https://github.com/bhaskar0210s/UsageQ.git
+cd UsageQ
 make install
 ```
 
-This builds the app, copies `TokenTank.app` to `/Applications`, links the `tokentank` command into `~/.local/bin`, and starts it. On its first launch it adds itself to Login Items; you can turn that off in **Settings → Launch at Login**. `make uninstall` removes everything again.
+`make install` builds the app and installs it as `/Applications/UsageQ.app`, which Finder shows as **Usage?**. It also links the `usageq` command into `~/.local/bin` and starts the app. On first launch the app adds itself to Login Items; turn that off under ⚙︎ → Launch at Login. `make uninstall` removes everything again.
+
+> **Why UsageQ?** The app is called **Usage?**, but a question mark can't go in repository names or terminal commands, so those use **UsageQ** / `usageq`.
 
 ## Using it
 
-- **Click the gauge** to open the menu. Every click refreshes the numbers.
-- **Read the banner first:** green means nothing runs dry before it refills, amber means something will at your current pace, red means a limit is empty or about to be.
-- **Gauges** read like a fuel gauge, from E (empty) to F (full). Under each one: when it refills, and either *Lasts to refill* or *Dry by 9:33 PM*.
-- **Hover the chart** to inspect any of the last 30 days. Move the pointer down and the day stays selected while you read it.
-- **Settings:** refresh every 1, 2, 5 or 15 minutes (default 5), and Launch at Login.
+- **Click the meters icon** to open the card. Every click refreshes the numbers.
+- **Hover the bars** to inspect any of the last 30 days. Move the pointer down and the day stays selected while you read it.
+- **⚙︎ Settings:** refresh every 1, 2, 5 or 15 minutes (default 5), Launch at Login, and Show Claude Code Data in Finder.
+- **⏻ Quit**, or press ⌘Q while the card is open.
+- When the numbers aren't fresh, for example offline, a short note at the top says so and shows how old they are.
 
 ## For scripts and agents
 
 ```sh
-tokentank          # readable summary
-tokentank --json   # limits, forecasts, spend, 30 daily points with top models, storage
+usageq          # readable summary
+usageq --json   # limits, pace, spending (30 daily points with each day's top models), disk use
 ```
 
 ```text
 Claude · you@example.com · Max 20x · updated just now
-Session        62% left  refills in 2h 41m     lasts until it refills
-Weekly         53% left  refills in 4d 3h      runs dry in 3d 6h at this pace
+Session        38% used  resets in 2h 29m   12% in reserve · lasts until reset
+Fable weekly   52% used  resets in 4d 1h    10% over pace · 100% in 2d 17h
 Today          $8.35       24.5M tokens
 This week      $134.12     363M tokens
 Last week      $249.40     668M tokens
@@ -70,45 +70,45 @@ Storage        1.4 GB
 
 ## How it works
 
-- **Limits** come from the same endpoint Claude Code uses for `/usage` (`api.anthropic.com/api/oauth/usage`). The token is Claude Code's own, read from its Keychain item through `/usr/bin/security`, which that item already trusts, so there's no prompt. The request runs in a short-lived `/usr/bin/curl` process with the token passed on stdin. Nothing is stored or sent anywhere else.
-- **Forecasts** assume you keep burning at your average rate since the window opened. If that would empty a limit before it refills, you get the time it runs dry.
-- **Costs** are read from `~/.claude/projects/**/*.jsonl`. Each API response is counted once, even though Claude Code logs it repeatedly. Prices follow Anthropic's API list prices: 5-minute vs 1-hour cache writes, long-context tiers and fast mode included. These are API-equivalent estimates; your subscription doesn't bill this way.
-- **The endpoint is rate-limited**, so TokenTank calls it at most every 30 seconds and backs off on HTTP 429. The local log scan runs on every click.
+- **Limits** come from the endpoint Claude Code uses for `/usage` (`api.anthropic.com/api/oauth/usage`). The app uses Claude Code's own login token. It reads the token from Claude Code's Keychain item through `/usr/bin/security`, which that item already trusts, so there's no prompt. Each request runs in a short-lived `/usr/bin/curl` process with the token passed on stdin. Nothing is stored or sent anywhere else.
+- **Pace** compares your usage with steady use since the window opened. If your current rate would reach 100% before the reset, you see when.
+- **Spending** is read from `~/.claude/projects/**/*.jsonl`. Each API response counts once, even though Claude Code logs it repeatedly. Prices follow Anthropic's API list prices, including cache writes (5-minute vs 1-hour), long-context tiers and fast mode. These are API-equivalent estimates; a subscription doesn't bill this way.
+- The usage endpoint rate-limits bursts. The app calls it at most every 30 seconds and backs off when told to; the local log scan runs on every click.
 
 ## Small on purpose
 
-TokenTank uses about 10 MB of memory idle and around 15 MB after the menu has been opened. An empty AppKit menu bar app needs 8–14 MB on its own, so TokenTank adds very little on top.
+About 10 MB of memory when idle, about 15 MB after the card has been opened. An empty AppKit menu bar app needs 8–14 MB on its own.
 
-- The data layer (`src/core`) is plain C++20; the app (`src/app/main.mm`) is a thin Objective-C++ shell, and the whole menu card is one custom-drawn view.
-- Keychain and network access happen in short-lived child processes, so no TLS or networking stack stays loaded.
-- Logs are parsed with a zero-copy field scanner. Its buffers live on their own memory pages and are returned to the system after every pass; after the first scan, only newly appended log lines are read.
+- The data layer (`src/core`) is plain C++20. The app (`src/app/main.mm`) is a thin AppKit shell, and the card is a single custom-drawn view using SF Pro, SF Symbols and system colors.
+- Keychain and network access run in short-lived helper processes, so no networking stack stays loaded.
+- The log scanner reads only newly appended lines after the first pass. Its buffers live on their own memory pages and are handed back to the system after every pass.
 
 ```sh
-make leakcheck   # runs Apple's `leaks` on the CLI and on the app through 100 refresh + menu cycles
+make leakcheck   # Apple's `leaks` on the CLI, then on the app through 100 refresh + open/close cycles
 ```
 
-TokenTank's own code shows zero leaks. In the app, `leaks` lists 26 KB from Apple's AppIntents framework, which an empty AppKit app reports identically.
+The app's own code shows zero leaks. `leaks` does list 26 KB from Apple's AppIntents framework, which an empty AppKit app reports identically.
 
 ## Develop
 
 ```sh
 make            # app + CLI in build/
 make dev        # debuggable build with test hooks:
-                #   --soak N                     refresh + menu cycles, printing memory
-                #   --render out.png --demo      draw the menu with demo data (--dark, --tiles 1-4, --day N)
-                #   --render-bar out.png         draw the menu bar item
+                #   --soak N                         refresh + menu cycles, printing memory
+                #   --render out.png --demo          draw the card with demo data (--dark, --day N, --stale)
+                #   --render-bar out.png [--dark]    draw the menu bar item
 ```
 
 ```
-src/core/   C++ data layer: limits API, credentials, log scanner, pricing, forecasts, storage
-src/cli/    tokentank command-line tool
+src/core/   C++ data layer: limits API, credentials, log scanner, pricing, pace, storage
+src/cli/    usageq command-line tool
 src/app/    AppKit menu bar app
 ```
 
 ## Acknowledgements
 
-Thanks to [CodexBar](https://github.com/steipete/CodexBar) (MIT), whose open-source Claude provider documents the usage endpoint and credential handling. TokenTank is an independent, Claude-only app with its own design and code.
+Thanks to [CodexBar](https://github.com/steipete/CodexBar) (MIT), whose open-source Claude provider documents the usage endpoint and credential handling. Usage? is an independent, Claude-only app with its own design and code.
 
 ## License
 
-MIT. TokenTank is an independent project, not affiliated with or endorsed by Anthropic. Claude is a trademark of Anthropic.
+MIT. Usage? is an independent project, not affiliated with or endorsed by Anthropic. Claude is a trademark of Anthropic.

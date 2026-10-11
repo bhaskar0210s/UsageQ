@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-namespace tt {
+namespace uq {
 
 struct Credentials {
     std::string accessToken;
@@ -65,7 +65,7 @@ struct Pace {
 // CodexBar-compatible pace: linear burn since the window started.
 Pace computePace(const LimitWindow& w, int64_t now);
 
-// "runs dry in 3h 4m at this pace", "lasts until it refills"; empty when there is nothing to say.
+// "12% in reserve \u00B7 lasts until reset", "10% over pace \u00B7 100% in 2d 17h"; empty when there is nothing to say.
 std::string paceText(const Pace& pace, bool session);
 
-}  // namespace tt
+}  // namespace uq

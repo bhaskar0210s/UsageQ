@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-namespace tt {
+namespace uq {
 
 std::string homeDir();
 int64_t nowSeconds();
@@ -23,4 +23,4 @@ int64_t parseISO8601(std::string_view s);
 // Local midnight of the day containing `t`, shifted by `dayOffset` days (DST aware).
 int64_t localMidnight(int64_t t, int dayOffset = 0);
 
-}  // namespace tt
+}  // namespace uq

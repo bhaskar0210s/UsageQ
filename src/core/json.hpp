@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace tt::json {
+namespace uq::json {
 
 struct Value {
     enum class Type : uint8_t { Null, Bool, Number, String, Array, Object };
@@ -47,4 +47,4 @@ void wipe(Value& v);
 // Appends `s` as a quoted, escaped JSON string literal.
 void appendQuoted(std::string& out, std::string_view s);
 
-}  // namespace tt::json
+}  // namespace uq::json

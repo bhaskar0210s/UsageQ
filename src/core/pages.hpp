@@ -9,7 +9,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace tt {
+namespace uq {
 
 template <class T>
 class PageArray {
@@ -71,4 +71,4 @@ private:
     size_t size_ = 0;
 };
 
-}  // namespace tt
+}  // namespace uq

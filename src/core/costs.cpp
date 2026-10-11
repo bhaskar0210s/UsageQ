@@ -12,7 +12,7 @@
 
 #include "util.hpp"
 
-namespace tt {
+namespace uq {
 
 // $ per million tokens. Cache writes cost 1.25x input (5-minute TTL) or 2x input (1-hour TTL).
 struct Price {
@@ -536,4 +536,4 @@ CostSummary CostScanner::summarize(int64_t now, int64_t windowEnd) const {
     return s;
 }
 
-}  // namespace tt
+}  // namespace uq

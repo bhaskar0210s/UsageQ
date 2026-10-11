@@ -11,11 +11,11 @@
 #include "proc.hpp"
 #include "util.hpp"
 
-#ifndef TT_VERSION
-#define TT_VERSION "dev"
+#ifndef UQ_VERSION
+#define UQ_VERSION "dev"
 #endif
 
-namespace tt {
+namespace uq {
 namespace {
 
 std::string lower(std::string_view s) {
@@ -126,7 +126,7 @@ UsageResult fetchUsage(const std::string& accessToken) {
     config += "\"\n";
     config += "header = \"anthropic-beta: oauth-2025-04-20\"\n";
     config += "header = \"Accept: application/json\"\n";
-    config += "user-agent = \"TokenTank/" TT_VERSION "\"\n";
+    config += "user-agent = \"UsageQ/" UQ_VERSION "\"\n";
     config += "proto = \"=https\"\nsilent\nshow-error\nconnect-timeout = 10\nmax-time = 20\n";
     config += "write-out = \"\\n%{http_code} %header{retry-after}\"\n";
     ProcResult r = runProcess("/usr/bin/curl", {"curl", "-q", "-K", "-"}, config, 30000, 4u << 20);
@@ -244,12 +244,15 @@ Pace computePace(const LimitWindow& w, int64_t now) {
 std::string paceText(const Pace& pace, bool session) {
     (void)session;
     if (!pace.valid) return {};
-    if (pace.lastsToReset) return "lasts until it refills";
-    if (pace.hasEta) {
+    const long delta = std::lround(std::fabs(pace.delta));
+    std::string text = delta == 0 ? "on pace" : std::to_string(delta) + (pace.delta < 0 ? "% in reserve" : "% over pace");
+    if (pace.lastsToReset) {
+        text += " \u00B7 lasts until reset";
+    } else if (pace.hasEta) {
         const std::string eta = formatCountdown(int64_t(pace.etaSeconds));
-        return eta == "now" ? "empty now" : "runs dry in " + eta + " at this pace";
+        text += eta == "now" ? " \u00B7 at 100% now" : " \u00B7 100% in " + eta;
     }
-    return "on pace";
+    return text;
 }
 
-}  // namespace tt
+}  // namespace uq

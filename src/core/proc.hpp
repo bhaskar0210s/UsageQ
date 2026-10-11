@@ -4,7 +4,7 @@
 #include <string_view>
 #include <vector>
 
-namespace tt {
+namespace uq {
 
 struct ProcResult {
     int status = -1;  // exit code, -1 if it could not run or was killed
@@ -17,4 +17,4 @@ struct ProcResult {
 ProcResult runProcess(const char* path, const std::vector<std::string>& args, std::string_view input, int timeoutMs,
                       size_t maxOutput = 1u << 20);
 
-}  // namespace tt
+}  // namespace uq

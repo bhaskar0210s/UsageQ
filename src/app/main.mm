@@ -1,4 +1,4 @@
-// TokenTank: how much Claude is left in the tank, in the menu bar.
+// Usage?: Claude usage in the menu bar.
 // The data layer is plain C++ (src/core); this file is the thin AppKit shell around it.
 #import <AppKit/AppKit.h>
 #import <ServiceManagement/ServiceManagement.h>
@@ -13,7 +13,7 @@
 #include "../core/format.hpp"
 #include "../core/util.hpp"
 
-#ifdef TT_DEV
+#ifdef UQ_DEV
 #include <mach/mach.h>
 static double FootprintMB() {
     task_vm_info_data_t info;
@@ -23,9 +23,10 @@ static double FootprintMB() {
 }
 #endif
 
+static NSString* const kAppName = @"Usage?";
 static const CGFloat kCardWidth = 320;
-static const CGFloat kPad = 14;
-static const CGFloat kChartHeight = 46;
+static const CGFloat kPad = 16;
+static const CGFloat kChartHeight = 52;
 static NSString* const kRefreshMinutesKey = @"refreshMinutes";
 static NSString* const kLoginConfiguredKey = @"loginItemConfigured";
 
@@ -35,26 +36,14 @@ static NSString* NS(const std::string& s) {
     return [[NSString alloc] initWithBytes:s.data() length:s.size() encoding:NSUTF8StringEncoding] ?: @"";
 }
 
-static NSColor* SRGB(uint32_t rgb, CGFloat alpha = 1) {
-    return [NSColor colorWithSRGBRed:((rgb >> 16) & 0xFF) / 255.0
-                               green:((rgb >> 8) & 0xFF) / 255.0
-                                blue:(rgb & 0xFF) / 255.0
-                               alpha:alpha];
+static NSDictionary* TextStyle(NSFont* font, NSColor* color) {
+    return @{NSFontAttributeName : font, NSForegroundColorAttributeName : color};
 }
 
-// Light/dark pair resolved at draw time (validated categorical slots 1 and 2).
-static NSColor* DynamicColor(uint32_t light, uint32_t dark, CGFloat alpha = 1) {
-    return [NSColor colorWithName:nil
-                  dynamicProvider:^NSColor*(NSAppearance* appearance) {
-                      NSAppearanceName match = [appearance
-                          bestMatchFromAppearancesWithNames:@[ NSAppearanceNameAqua, NSAppearanceNameDarkAqua ]];
-                      return SRGB([match isEqualToString:NSAppearanceNameDarkAqua] ? dark : light, alpha);
-                  }];
-}
-
-static NSDictionary* TextStyle(NSFont* font, NSColor* color, CGFloat kern = 0) {
-    if (kern == 0) return @{NSFontAttributeName : font, NSForegroundColorAttributeName : color};
-    return @{NSFontAttributeName : font, NSForegroundColorAttributeName : color, NSKernAttributeName : @(kern)};
+static NSDictionary* Recolored(NSDictionary* style, NSColor* color) {
+    NSMutableDictionary* copy = [style mutableCopy];
+    copy[NSForegroundColorAttributeName] = color;
+    return copy;
 }
 
 static CGFloat TextWidth(NSString* s, NSDictionary* style) {
@@ -92,16 +81,14 @@ static void DrawRight(NSString* s, CGFloat right, CGFloat y, NSDictionary* style
     [s drawInRect:NSMakeRect(right - maxWidth, y, maxWidth, size.height) withAttributes:truncating];
 }
 
-// Draws the first candidate that fits `maxWidth`, centered on `cx` (truncating the last one).
-static void DrawCentered(NSArray<NSString*>* candidates, CGFloat cx, CGFloat y, NSDictionary* style, CGFloat maxWidth) {
-    for (NSString* s in candidates) {
-        const CGFloat w = TextWidth(s, style);
-        if (w <= maxWidth || s == candidates.lastObject) {
-            const CGFloat drawn = MIN(w, maxWidth);
-            DrawLeft(s, round(cx - drawn / 2), y, style, maxWidth);
-            return;
-        }
-    }
+static void DrawCentered(NSString* s, CGFloat cx, CGFloat y, NSDictionary* style) {
+    [s drawAtPoint:NSMakePoint(round(cx - TextWidth(s, style) / 2), y) withAttributes:style];
+}
+
+static void FillRounded(NSRect r, CGFloat radius, NSColor* color) {
+    if (r.size.width <= 0 || r.size.height <= 0) return;
+    [color setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:r xRadius:radius yRadius:radius] fill];
 }
 
 // Upward bar: rounded at the data end, square on the baseline.
@@ -116,7 +103,37 @@ static void FillBar(NSRect r, CGFloat radius) {
     [NSGraphicsContext restoreGraphicsState];
 }
 
-// Clock time in the user's locale and 12/24-hour setting: "5:30 PM" today, "Fri 5:30 PM" later.
+// A neutral tint that follows the menu's light/dark appearance.
+static NSColor* Tint(CGFloat alpha) {
+    return [NSColor colorWithName:nil
+                  dynamicProvider:^NSColor*(NSAppearance* appearance) {
+                      const BOOL dark = [[appearance bestMatchFromAppearancesWithNames:@[
+                          NSAppearanceNameAqua, NSAppearanceNameDarkAqua
+                      ]] isEqualToString:NSAppearanceNameDarkAqua];
+                      return [NSColor colorWithWhite:dark ? 1 : 0 alpha:alpha];
+                  }];
+}
+
+static NSImage* Symbol(NSString* name, CGFloat size, NSFontWeight weight, NSColor* color) {
+    NSImage* image = [NSImage imageWithSystemSymbolName:name accessibilityDescription:nil];
+    NSImageSymbolConfiguration* config = [NSImageSymbolConfiguration configurationWithPointSize:size weight:weight];
+    config = [config configurationByApplyingConfiguration:[NSImageSymbolConfiguration
+                                                              configurationWithHierarchicalColor:color]];
+    return [image imageWithSymbolConfiguration:config];
+}
+
+static void DrawSymbol(NSImage* image, NSPoint center) {
+    if (!image) return;
+    const NSSize s = image.size;
+    [image drawInRect:NSMakeRect(round(center.x - s.width / 2), round(center.y - s.height / 2), s.width, s.height)
+             fromRect:NSZeroRect
+            operation:NSCompositingOperationSourceOver
+             fraction:1
+       respectFlipped:YES
+                hints:nil];
+}
+
+// Clock time in the user's locale and 12/24-hour setting: "5:30 PM" today, "Thu 5:30 PM" later.
 static NSString* ClockTime(int64_t t, int64_t now) {
     static NSDateFormatter *time, *dayAndTime;
     static dispatch_once_t once;
@@ -127,214 +144,144 @@ static NSString* ClockTime(int64_t t, int64_t now) {
         [dayAndTime setLocalizedDateFormatFromTemplate:@"EEEjmm"];
     });
     NSDate* date = [NSDate dateWithTimeIntervalSince1970:double(t)];
-    return [(tt::localMidnight(t) == tt::localMidnight(now) ? time : dayAndTime) stringFromDate:date];
+    NSString* s = [(uq::localMidnight(t) == uq::localMidnight(now) ? time : dayAndTime) stringFromDate:date];
+    return [s stringByReplacingOccurrencesOfString:@", " withString:@" "];
 }
 
-// MARK: - Limit state
-
-// Fixed status palette. Every use is paired with a glyph and words, never color alone.
-enum class Level { Good, Warning, Critical, Neutral };
-
-static NSColor* LevelColor(Level level) {
-    switch (level) {
-        case Level::Good: return SRGB(0x0ca30c);
-        case Level::Warning: return SRGB(0xfab219);
-        case Level::Critical: return SRGB(0xd03b3b);
-        case Level::Neutral: return NSColor.secondaryLabelColor;
-    }
-    return NSColor.secondaryLabelColor;
-}
-
-static int Severity(Level level) {
-    return level == Level::Critical ? 2 : level == Level::Warning ? 1 : 0;
-}
-
-// Check, exclamation, cross or "i" on a filled shape.
-static void DrawGlyph(Level level, NSRect r) {
-    NSColor* color = LevelColor(level);
-    [color set];
-    if (level == Level::Warning) {
-        NSBezierPath* t = [NSBezierPath bezierPath];
-        [t moveToPoint:NSMakePoint(NSMidX(r), NSMinY(r) + r.size.height * 0.06)];
-        [t lineToPoint:NSMakePoint(NSMaxX(r) - r.size.width * 0.04, NSMaxY(r) - r.size.height * 0.08)];
-        [t lineToPoint:NSMakePoint(NSMinX(r) + r.size.width * 0.04, NSMaxY(r) - r.size.height * 0.08)];
-        [t closePath];
-        t.lineJoinStyle = NSLineJoinStyleRound;
-        t.lineWidth = r.size.width * 0.16;
-        [t fill];
-        [t stroke];
-    } else {
-        [[NSBezierPath bezierPathWithOvalInRect:r] fill];
-    }
-    const CGFloat x = r.origin.x, y = r.origin.y, w = r.size.width, h = r.size.height;
-    NSColor* mark = level == Level::Warning ? [NSColor colorWithWhite:0 alpha:0.78] : NSColor.whiteColor;
-    [mark set];
-    NSBezierPath* m = [NSBezierPath bezierPath];
-    m.lineWidth = MAX(1.1, w * 0.13);
-    m.lineCapStyle = NSLineCapStyleRound;
-    m.lineJoinStyle = NSLineJoinStyleRound;
-    const CGFloat dot = MAX(0.7, w * 0.075);
-    switch (level) {
-        case Level::Good:
-            [m moveToPoint:NSMakePoint(x + 0.28 * w, y + 0.53 * h)];
-            [m lineToPoint:NSMakePoint(x + 0.44 * w, y + 0.68 * h)];
-            [m lineToPoint:NSMakePoint(x + 0.73 * w, y + 0.36 * h)];
-            [m stroke];
-            break;
-        case Level::Critical:
-            [m moveToPoint:NSMakePoint(x + 0.34 * w, y + 0.34 * h)];
-            [m lineToPoint:NSMakePoint(x + 0.66 * w, y + 0.66 * h)];
-            [m moveToPoint:NSMakePoint(x + 0.66 * w, y + 0.34 * h)];
-            [m lineToPoint:NSMakePoint(x + 0.34 * w, y + 0.66 * h)];
-            [m stroke];
-            break;
-        case Level::Warning:
-            [m moveToPoint:NSMakePoint(x + 0.5 * w, y + 0.40 * h)];
-            [m lineToPoint:NSMakePoint(x + 0.5 * w, y + 0.62 * h)];
-            [m stroke];
-            [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(x + 0.5 * w - dot, y + 0.76 * h - dot, 2 * dot, 2 * dot)] fill];
-            break;
-        case Level::Neutral:
-            [m moveToPoint:NSMakePoint(x + 0.5 * w, y + 0.46 * h)];
-            [m lineToPoint:NSMakePoint(x + 0.5 * w, y + 0.72 * h)];
-            [m stroke];
-            [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(x + 0.5 * w - dot, y + 0.28 * h - dot, 2 * dot, 2 * dot)] fill];
-            break;
-    }
-}
-
-// One limit, ready to show: what is left, how urgent it is, and what to say about it.
-struct LimitView {
-    tt::LimitWindow window;
-    tt::Pace pace;
-    double left = 0;  // percent
-    Level level = Level::Good;
-    NSString* name;                  // "Session", "Fable weekly"
-    NSArray<NSString*>* verdicts;    // longest first, e.g. "Dry by Fri 4:10 PM", "Dry Fri 4:10 PM"
-    int64_t dryAt = 0;               // when it runs out at the current pace (0 = not before refill)
-};
-
-static LimitView MakeLimitView(const tt::LimitWindow& raw, int64_t now) {
-    LimitView v;
-    v.window = tt::effectiveWindow(raw, now);
-    v.pace = tt::computePace(v.window, now);
-    v.left = std::clamp(100.0 - v.window.usedPercent, 0.0, 100.0);
-    v.name = NS(v.window.title);
-    const bool runsDry = v.pace.valid && v.pace.hasEta && !v.pace.lastsToReset;
-    if (v.left < 0.5) {
-        v.level = Level::Critical;
-        v.verdicts = @[ @"Empty" ];
-    } else if (runsDry) {
-        v.dryAt = now + int64_t(v.pace.etaSeconds);
-        v.level = (v.pace.etaSeconds < 1800 || v.left <= 5) ? Level::Critical : Level::Warning;
-        NSString* when = ClockTime(v.dryAt, now);
-        v.verdicts = @[ [@"Dry by " stringByAppendingString:when], [@"Dry " stringByAppendingString:when], @"Runs dry" ];
-    } else if (v.left <= 5) {
-        v.level = Level::Critical;
-        v.verdicts = @[ @"Almost empty" ];
-    } else {
-        v.level = Level::Good;
-        v.verdicts = v.pace.lastsToReset ? @[ @"Lasts to refill", @"Lasts" ] : @[ @"On track" ];
-    }
-    return v;
-}
-
-// Gauge arc. In this flipped view, 180°..360° runs left (E) over the top to right (F).
-static void StrokeArc(NSPoint c, CGFloat r, CGFloat lineWidth, double fromDeg, double toDeg) {
-    NSBezierPath* p = [NSBezierPath bezierPath];
-    p.lineWidth = lineWidth;
-    p.lineCapStyle = NSLineCapStyleRound;
-    p.lineJoinStyle = NSLineJoinStyleRound;
-    const int steps = std::max(2, int((toDeg - fromDeg) / 3));
-    for (int i = 0; i <= steps; ++i) {
-        const double a = (fromDeg + (toDeg - fromDeg) * i / steps) * M_PI / 180;
-        const NSPoint pt = NSMakePoint(c.x + r * cos(a), c.y + r * sin(a));
-        if (i == 0)
-            [p moveToPoint:pt];
-        else
-            [p lineToPoint:pt];
-    }
-    [p stroke];
-}
-
-// Menu bar glyph: a small fuel gauge reading the session's remaining share.
-static NSImage* GaugeIcon(double leftFraction) {
-    NSImage* image = [NSImage imageWithSize:NSMakeSize(18, 16)
+// Menu bar glyph: two small capsules, session (top) and weekly, filled to how much is used.
+static NSImage* MeterGlyph(double session, double weekly) {
+    NSImage* image = [NSImage imageWithSize:NSMakeSize(15, 13)
                                     flipped:NO
                              drawingHandler:^BOOL(NSRect) {
-                                 const NSPoint c = NSMakePoint(9, 4.5);
-                                 const CGFloat r = 6.5;
-                                 NSBezierPath* track = [NSBezierPath bezierPath];
-                                 [track appendBezierPathWithArcWithCenter:c radius:r startAngle:180 endAngle:0 clockwise:YES];
-                                 track.lineWidth = 2.2;
-                                 track.lineCapStyle = NSLineCapStyleRound;
-                                 [[NSColor colorWithWhite:0 alpha:0.35] setStroke];
-                                 [track stroke];
-                                 const double f = std::clamp(leftFraction, 0.0, 1.0);
-                                 [NSColor.blackColor set];
-                                 if (leftFraction >= 0 && f > 0.01) {
-                                     NSBezierPath* level = [NSBezierPath bezierPath];
-                                     [level appendBezierPathWithArcWithCenter:c
-                                                                       radius:r
-                                                                   startAngle:180
-                                                                     endAngle:180 - 180 * f
-                                                                    clockwise:YES];
-                                     level.lineWidth = 2.2;
-                                     level.lineCapStyle = NSLineCapStyleRound;
-                                     [level stroke];
-                                 }
-                                 const double a = (180 - 180 * (leftFraction >= 0 ? f : 0.5)) * M_PI / 180;
-                                 NSBezierPath* needle = [NSBezierPath bezierPath];
-                                 [needle moveToPoint:c];
-                                 [needle lineToPoint:NSMakePoint(c.x + (r - 2.4) * cos(a), c.y + (r - 2.4) * sin(a))];
-                                 needle.lineWidth = 1.5;
-                                 needle.lineCapStyle = NSLineCapStyleRound;
-                                 [needle stroke];
-                                 [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(c.x - 1.4, c.y - 1.4, 2.8, 2.8)] fill];
+                                 auto capsule = [](CGFloat y, double fraction) {
+                                     const NSRect track = NSMakeRect(0.75, y, 13.5, 3.75);
+                                     NSBezierPath* outline = [NSBezierPath bezierPathWithRoundedRect:track
+                                                                                             xRadius:1.875
+                                                                                             yRadius:1.875];
+                                     outline.lineWidth = 1;
+                                     [[NSColor colorWithWhite:0 alpha:0.45] setStroke];
+                                     [outline stroke];
+                                     if (fraction > 0.01) {
+                                         NSRect filled = track;
+                                         filled.size.width = MAX(track.size.height, track.size.width * std::min(1.0, fraction));
+                                         [NSColor.blackColor setFill];
+                                         [[NSBezierPath bezierPathWithRoundedRect:filled xRadius:1.875 yRadius:1.875] fill];
+                                     }
+                                 };
+                                 capsule(7.75, session);
+                                 capsule(1.5, weekly);
                                  return YES;
                              }];
     [image setTemplate:YES];  // `template` is a C++ keyword
     return image;
 }
 
+// MARK: - Limits
+
+// One limit, worded the way it is shown.
+struct LimitRow {
+    uq::LimitWindow window;
+    uq::Pace pace;
+    double used = 0;
+    NSString* name;
+    NSString* usedText;  // "38%"
+    NSString* status;    // "12% in reserve", "10% over pace", "Limit reached"...
+    NSColor* statusColor;
+    NSString* resets;    // "Resets 6:15 PM · in 2h 29m"
+    NSString* outlook;   // "lasts until reset", "100% by Wed 8:40 AM"; nil = no line
+    NSColor* outlookColor;
+};
+
+static LimitRow MakeLimitRow(const uq::LimitWindow& raw, int64_t now) {
+    LimitRow r;
+    r.window = uq::effectiveWindow(raw, now);
+    r.pace = uq::computePace(r.window, now);
+    r.used = std::clamp(r.window.usedPercent, 0.0, 100.0);
+    r.name = NS(r.window.title);
+    r.usedText = NS(uq::formatPercent(r.used));
+    r.statusColor = NSColor.secondaryLabelColor;
+    r.outlookColor = NSColor.secondaryLabelColor;
+    if (!r.window.resetsAt) {
+        r.status = @"Not started";
+        r.resets = @"Starts with your next prompt";
+        return r;
+    }
+    r.resets = [NSString stringWithFormat:@"Resets %@ · in %@", ClockTime(r.window.resetsAt, now),
+                                          NS(uq::formatCountdown(r.window.resetsAt - now))];
+    if (r.used >= 100) {
+        r.status = @"Limit reached";
+        r.statusColor = NSColor.systemRedColor;
+        return r;
+    }
+    if (!r.pace.valid) {
+        r.status = @"Just started";
+        return r;
+    }
+    const long delta = std::lround(std::fabs(r.pace.delta));
+    if (delta == 0) {
+        r.status = @"On pace";
+    } else if (r.pace.delta < 0) {
+        r.status = [NSString stringWithFormat:@"%ld%% in reserve", delta];
+        r.statusColor = NSColor.systemGreenColor;
+    } else {
+        r.status = [NSString stringWithFormat:@"%ld%% over pace", delta];
+        r.statusColor = NSColor.systemOrangeColor;
+    }
+    if (r.pace.lastsToReset) {
+        r.outlook = @"lasts until reset";
+        r.outlookColor = NSColor.systemGreenColor;
+    } else if (r.pace.hasEta) {
+        r.outlook = [@"100% by " stringByAppendingString:ClockTime(now + int64_t(r.pace.etaSeconds), now)];
+        r.outlookColor = NSColor.systemOrangeColor;
+    }
+    return r;
+}
+
 // MARK: - Card
 
-@interface TTCardView : NSView
-- (void)showSnapshot:(const tt::Snapshot&)snapshot;
+@protocol UQCardActions <NSObject>
+- (void)cardOpenSettings;
+- (void)cardQuit;
+@end
+
+@interface UQCardView : NSView
+@property(nonatomic, weak) id<UQCardActions> actions;
+- (void)showSnapshot:(const uq::Snapshot&)snapshot;
 - (CGFloat)preferredHeight;
 - (void)setHoverDay:(NSInteger)day;
 - (void)clearHover;
 @end
 
-@implementation TTCardView {
-    tt::Snapshot _snap;
+enum : NSInteger { kNoButton = 0, kSettingsButton = 1, kQuitButton = 2 };
+
+@implementation UQCardView {
+    uq::Snapshot _snap;
     BOOL _hasData;
-    NSRect _chartRect;
-    NSInteger _hoverDay;
+    NSRect _chartRect, _settingsRect, _quitRect;
+    NSInteger _hoverDay, _hoverButton;
     NSTrackingArea* _tracking;
-    NSDictionary *_title, *_body, *_secondary, *_caption, *_head, *_tiny, *_big;
-    NSColor *_cost, *_costDim, *_tokens, *_tokensDim;
+    NSDictionary *_name, *_big, *_body, *_bodyStrong, *_secondary, *_small, *_footnote;
+    NSImage *_gear, *_gearHot, *_power, *_powerHot, *_warning;
 }
 
 - (instancetype)initWithFrame:(NSRect)frame {
     if ((self = [super initWithFrame:frame])) {
         _hoverDay = -1;
-        // Four fonts on purpose: every size/weight pair carries its own glyph caches.
-        NSFont* small = [NSFont systemFontOfSize:9.5 weight:NSFontWeightSemibold];
-        NSFont* body = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
-        NSFont* strong = [NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightSemibold];
-        NSFont* big = [NSFont monospacedDigitSystemFontOfSize:16 weight:NSFontWeightSemibold];
-        _title = TextStyle(strong, NSColor.labelColor);
-        _body = TextStyle(body, NSColor.labelColor);
-        _secondary = TextStyle(body, NSColor.secondaryLabelColor);
-        _caption = TextStyle(small, NSColor.secondaryLabelColor, 0.5);
-        _head = TextStyle(small, NSColor.secondaryLabelColor);
-        _tiny = TextStyle(small, NSColor.tertiaryLabelColor);
-        _big = TextStyle(big, NSColor.labelColor);
-        _cost = DynamicColor(0x2a78d6, 0x3987e5);
-        _tokens = DynamicColor(0xeb6834, 0xd95926);
-        _costDim = DynamicColor(0x2a78d6, 0x3987e5, 0.35);
-        _tokensDim = DynamicColor(0xeb6834, 0xd95926, 0.35);
+        NSFont* rounded = [NSFont monospacedDigitSystemFontOfSize:20 weight:NSFontWeightSemibold];
+        NSFontDescriptor* roundedDesc = [rounded.fontDescriptor fontDescriptorWithDesign:NSFontDescriptorSystemDesignRounded];
+        if (roundedDesc) rounded = [NSFont fontWithDescriptor:roundedDesc size:20] ?: rounded;
+        _name = TextStyle([NSFont systemFontOfSize:13 weight:NSFontWeightSemibold], NSColor.labelColor);
+        _big = TextStyle(rounded, NSColor.labelColor);
+        _body = TextStyle([NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular], NSColor.labelColor);
+        _bodyStrong = TextStyle([NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightSemibold], NSColor.labelColor);
+        _secondary = TextStyle([NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular], NSColor.secondaryLabelColor);
+        _small = TextStyle([NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular], NSColor.secondaryLabelColor);
+        _footnote = TextStyle([NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular], NSColor.tertiaryLabelColor);
+        _gear = Symbol(@"gearshape", 13, NSFontWeightRegular, NSColor.secondaryLabelColor);
+        _gearHot = Symbol(@"gearshape", 13, NSFontWeightRegular, NSColor.labelColor);
+        _power = Symbol(@"power", 13, NSFontWeightRegular, NSColor.secondaryLabelColor);
+        _powerHot = Symbol(@"power", 13, NSFontWeightRegular, NSColor.labelColor);
+        _warning = Symbol(@"exclamationmark.triangle.fill", 11, NSFontWeightRegular, NSColor.systemOrangeColor);
     }
     return self;
 }
@@ -343,7 +290,7 @@ static NSImage* GaugeIcon(double leftFraction) {
     return YES;
 }
 
-- (void)showSnapshot:(const tt::Snapshot&)snapshot {
+- (void)showSnapshot:(const uq::Snapshot&)snapshot {
     _snap = snapshot;
     _hasData = YES;
     [self setNeedsDisplay:YES];
@@ -357,97 +304,56 @@ static NSImage* GaugeIcon(double leftFraction) {
     [self layout:YES];
 }
 
-- (void)divider:(CGFloat)y {
+- (void)separator:(CGFloat)y {
     [NSColor.separatorColor setFill];
     NSRectFillUsingOperation(NSMakeRect(kPad, y, kCardWidth - 2 * kPad, 1), NSCompositingOperationSourceOver);
 }
 
 - (int64_t)dayStart:(NSInteger)index {
-    return tt::localMidnight(_snap.cost.firstDay + int64_t(index) * 86400 + 43200);
+    return uq::localMidnight(_snap.cost.firstDay + int64_t(index) * 86400 + 43200);
 }
 
-// The one-line answer at the top: can I keep going?
-- (NSString*)headline:(const std::vector<LimitView>&)limits level:(Level*)level now:(int64_t)now {
-    const tt::Snapshot& s = _snap;
-    *level = Level::Neutral;
-    if (!_hasData) return @"Checking your limits…";
-    const bool fresh = s.updatedAt > 0 && now - s.updatedAt < 900;
-    if (!s.notice.empty() && (!fresh || limits.empty())) return NS(s.notice);
-    if (limits.empty()) return @"Usage limits unavailable";
-    const LimitView* worst = nullptr;
-    for (const LimitView& v : limits) {
-        if (Severity(v.level) == 0) continue;
-        if (!worst || Severity(v.level) > Severity(worst->level) ||
-            (Severity(v.level) == Severity(worst->level) && v.dryAt && (!worst->dryAt || v.dryAt < worst->dryAt)))
-            worst = &v;
-    }
-    if (!worst) {
-        *level = Level::Good;
-        return @"All good · nothing runs dry before it refills";
-    }
-    *level = worst->level;
-    if (worst->left < 0.5)
-        return worst->window.resetsAt
-                   ? [NSString stringWithFormat:@"%@ is empty · refills %@", worst->name,
-                                                ClockTime(worst->window.resetsAt, now)]
-                   : [NSString stringWithFormat:@"%@ is empty", worst->name];
-    if (worst->dryAt)
-        return [NSString stringWithFormat:@"%@ runs dry ~%@ at this pace", worst->name, ClockTime(worst->dryAt, now)];
-    return [NSString stringWithFormat:@"%@ is almost empty", worst->name];
+// What the card warns about, if anything: offline, signed out, rate limited.
+- (NSString*)noticeText:(int64_t)now {
+    const uq::Snapshot& s = _snap;
+    if (!_hasData || s.notice.empty()) return nil;
+    NSString* notice = NS(s.notice);
+    if (s.updatedAt > 0 && (s.notice == "Offline" || s.notice == "Claude is rate limiting checks"))
+        notice = [notice stringByAppendingFormat:@" · showing numbers from %@", NS(uq::formatAgo(now - s.updatedAt))];
+    return notice;
 }
 
-// One limit as a fuel gauge tile. Returns its height.
-- (CGFloat)tank:(const LimitView&)v in:(NSRect)tile draw:(BOOL)draw now:(int64_t)now {
-    const CGFloat cx = NSMidX(tile), w = tile.size.width;
-    CGFloat y = tile.origin.y;
-    if (draw) DrawCentered(@[ v.name.uppercaseString ], cx, y, _caption, w);
-    y += 16;
-    const CGFloat r = MIN(w / 2 - 12, 32), stroke = 7;
-    const CGFloat cy = y + r + stroke / 2;
-    if (draw) {
-        const NSPoint c = NSMakePoint(cx, cy);
-        [NSColor.quaternaryLabelColor setStroke];
-        StrokeArc(c, r, stroke, 180, 360);
-        if (v.left >= 0.5) {
-            [LevelColor(v.level) setStroke];
-            StrokeArc(c, r, stroke, 180, 180 + 180 * v.left / 100.0);
-        }
-        DrawCentered(@[ NS(tt::formatPercent(v.left)) ], cx, cy - 20, _big, 2 * r - stroke);
-        DrawCentered(@[ @"LEFT" ], cx, cy + 1, _caption, w);
-        DrawCentered(@[ @"E" ], cx - r, cy + stroke / 2 + 1, _tiny, 14);
-        DrawCentered(@[ @"F" ], cx + r, cy + stroke / 2 + 1, _tiny, 14);
+// The bullet meter: 0-50 / 50-75 / 75-100 bands, the used bar, the even-pace marker and the
+// reserve (green) or over-pace (orange) stretch between them.
+- (void)meter:(NSRect)m row:(const LimitRow&)row {
+    const CGFloat x = m.origin.x, y = m.origin.y, w = m.size.width;
+    const NSRect track = NSMakeRect(x, y + 3, w, 12);
+    [NSGraphicsContext saveGraphicsState];
+    [[NSBezierPath bezierPathWithRoundedRect:track xRadius:6 yRadius:6] addClip];
+    [Tint(0.07) setFill];
+    NSRectFillUsingOperation(NSMakeRect(x, track.origin.y, w * 0.5, 12), NSCompositingOperationSourceOver);
+    [Tint(0.11) setFill];
+    NSRectFillUsingOperation(NSMakeRect(x + w * 0.5, track.origin.y, w * 0.25, 12), NSCompositingOperationSourceOver);
+    [Tint(0.16) setFill];
+    NSRectFillUsingOperation(NSMakeRect(x + w * 0.75, track.origin.y, w * 0.25, 12), NSCompositingOperationSourceOver);
+    [NSGraphicsContext restoreGraphicsState];
+
+    const CGFloat usedX = w * row.used / 100;
+    if (row.used > 0) FillRounded(NSMakeRect(x, y + 6, MAX(6, usedX), 6), 3, NSColor.systemBlueColor);
+    if (row.pace.valid) {
+        const CGFloat paceX = w * std::clamp(row.pace.expected, 0.0, 100.0) / 100;
+        if (paceX > usedX + 0.5)
+            FillRounded(NSMakeRect(x + usedX, y + 7, paceX - usedX, 4), 2, NSColor.systemGreenColor);
+        else if (usedX > paceX + 0.5)
+            FillRounded(NSMakeRect(x + paceX, y + 6, usedX - paceX, 6), 3, NSColor.systemOrangeColor);
+        FillRounded(NSMakeRect(round(x + paceX) - 1, y, 2, 18), 1, NSColor.labelColor);
     }
-    y = cy + 17;
-    if (draw) {
-        if (v.window.resetsAt) {
-            NSString* when = ClockTime(v.window.resetsAt, now);
-            DrawCentered(@[ [@"Refills " stringByAppendingString:when], when ], cx, y, _secondary, w);
-        } else {
-            DrawCentered(@[ @"Starts with your next prompt", @"Not started" ], cx, y, _secondary, w);
-        }
-    }
-    y += 16;
-    if (draw) {  // glyph + verdict, centered together
-        NSString* text = v.verdicts.lastObject;
-        for (NSString* candidate in v.verdicts)
-            if (TextWidth(candidate, _secondary) + 13 <= w) {
-                text = candidate;
-                break;
-            }
-        const CGFloat textWidth = MIN(TextWidth(text, _secondary), w - 13);
-        const CGFloat x0 = round(cx - (textWidth + 13) / 2);
-        DrawGlyph(v.level, NSMakeRect(x0, y + 2.5, 9, 9));
-        DrawLeft(text, x0 + 13, y, _secondary, w - 13);
-    }
-    y += 16;
-    return y - tile.origin.y;
 }
 
 // Each day gets a cost bar and a token bar side by side, both growing up from one baseline.
-// The two series have different units, so each is scaled to its own 30-day peak; the day
-// details under the chart carry the actual values.
+// Units differ, so each series is scaled to its own 30-day peak; the day box has the values.
 - (void)drawBars {
-    const tt::CostSummary& c = _snap.cost;
+    const uq::CostSummary& c = _snap.cost;
     double maxCost = 0;
     uint64_t maxTokens = 0;
     for (const auto& d : c.days) {
@@ -457,170 +363,190 @@ static NSImage* GaugeIcon(double leftFraction) {
     const NSRect r = _chartRect;
     const CGFloat baseline = NSMaxY(r);
     const CGFloat slot = r.size.width / c.days.size();
-    const CGFloat barWidth = MAX(1, floor(slot - 3) / 2);  // 1pt inside a pair, >= 2pt between days
+    const CGFloat barWidth = MAX(1, floor(slot - 3) / 2);
     const CGFloat pairWidth = barWidth * 2 + 1;
-
-    [NSColor.quaternaryLabelColor setFill];
-    NSRectFillUsingOperation(NSMakeRect(r.origin.x, baseline - 0.5, r.size.width, 0.5), NSCompositingOperationSourceOver);
-
+    [NSColor.separatorColor setFill];
+    NSRectFillUsingOperation(NSMakeRect(r.origin.x, baseline - 1, r.size.width, 1), NSCompositingOperationSourceOver);
+    CGContextRef cg = NSGraphicsContext.currentContext.CGContext;
     for (size_t i = 0; i < c.days.size(); ++i) {
         const CGFloat x = round((r.origin.x + i * slot + (slot - pairWidth) / 2) * 2) / 2;
-        const BOOL dim = _hoverDay >= 0 && _hoverDay != NSInteger(i);
+        CGContextSaveGState(cg);
+        if (_hoverDay >= 0 && _hoverDay != NSInteger(i)) CGContextSetAlpha(cg, 0.35);
         if (maxCost > 0 && c.days[i].cost > 0) {
-            const CGFloat h = MAX(1, round(r.size.height * c.days[i].cost / maxCost));
-            [(dim ? _costDim : _cost) setFill];
-            FillBar(NSMakeRect(x, baseline - h, barWidth, h), 1.5);
+            const CGFloat h = MAX(2, round((r.size.height - 1) * c.days[i].cost / maxCost));
+            [NSColor.systemBlueColor setFill];
+            FillBar(NSMakeRect(x, baseline - 1 - h, barWidth, h), 1.5);
         }
         if (maxTokens > 0 && c.days[i].tokens > 0) {
-            const CGFloat h = MAX(1, round(r.size.height * double(c.days[i].tokens) / double(maxTokens)));
-            [(dim ? _tokensDim : _tokens) setFill];
-            FillBar(NSMakeRect(x + barWidth + 1, baseline - h, barWidth, h), 1.5);
+            const CGFloat h = MAX(2, round((r.size.height - 1) * double(c.days[i].tokens) / double(maxTokens)));
+            [NSColor.systemOrangeColor setFill];
+            FillBar(NSMakeRect(x + barWidth + 1, baseline - 1 - h, barWidth, h), 1.5);
         }
+        CGContextRestoreGState(cg);
     }
 }
 
-- (CGFloat)legend:(NSString*)label color:(NSColor*)color right:(CGFloat)right y:(CGFloat)y {
-    const CGFloat w = TextWidth(label, _tiny);
-    DrawLeft(label, right - w, y, _tiny, w + 1);
-    [color setFill];
-    [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(right - w - 11, y + 2.5, 7, 7) xRadius:1.5 yRadius:1.5] fill];
-    return right - w - 11;
+- (CGFloat)legend:(NSString*)label color:(NSColor*)color x:(CGFloat)x y:(CGFloat)y {
+    FillRounded(NSMakeRect(x, y + 4, 7, 7), 2, color);
+    return x + 11 + DrawLeft(label, x + 11, y, _small, 80);
 }
 
 // One pass that either measures or draws, so layout and drawing never disagree.
 - (CGFloat)layout:(BOOL)draw {
     const CGFloat left = kPad, right = kCardWidth - kPad, width = right - left;
-    const int64_t now = tt::nowSeconds();
-    const tt::Snapshot& s = _snap;
-    CGFloat y = 10;
+    const int64_t now = uq::nowSeconds();
+    const uq::Snapshot& s = _snap;
+    CGFloat y = 14;
 
-    // Header: app, plan, account, freshness.
-    if (draw) {
-        const CGFloat used = DrawLeft(@"TokenTank", left, y, _title, width);
-        DrawRight(NS(s.account.plan), right, y + 1.5, _secondary, width - used - 12);
-    }
-    y += 19;
-    if (draw) {
-        NSString* updated = !_hasData        ? @""
-                            : s.updatedAt ? [@"Updated " stringByAppendingString:NS(tt::formatAgo(now - s.updatedAt))]
-                                          : @"Not updated yet";
-        const CGFloat w = TextWidth(updated, _secondary);
-        DrawRight(updated, right, y, _secondary, width);
-        DrawLeft(NS(s.account.email), left, y, _secondary, width - w - 12);
-    }
-    y += 23;
-
-    // Verdict banner.
-    std::vector<LimitView> limits;
-    limits.reserve(s.windows.size());
-    for (const tt::LimitWindow& w : s.windows) limits.push_back(MakeLimitView(w, now));
-    Level level;
-    NSString* headline = [self headline:limits level:&level now:now];
-    if (draw) {
-        const NSRect banner = NSMakeRect(left, y, width, 28);
-        [(level == Level::Neutral ? NSColor.quaternaryLabelColor : [LevelColor(level) colorWithAlphaComponent:0.16]) setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:banner xRadius:7 yRadius:7] fill];
-        DrawGlyph(level, NSMakeRect(left + 8, y + 7, 14, 14));
-        DrawLeft(headline, left + 29, y + 6.5, _body, width - 37);
-    }
-    y += 28 + 14;
-
-    // Tanks: one fuel gauge per limit, up to three in a row.
-    if (!limits.empty()) {
-        const size_t columns = limits.size() <= 3 ? limits.size() : 2;
-        const CGFloat gap = 10;
-        const CGFloat tileWidth = floor((width - gap * (columns - 1)) / columns);
-        CGFloat rowTop = y, rowHeight = 0;
-        for (size_t i = 0; i < limits.size(); ++i) {
-            const size_t column = i % columns;
-            if (i > 0 && column == 0) {
-                rowTop += rowHeight + 12;
-                rowHeight = 0;
-            }
-            const NSRect tile = NSMakeRect(left + column * (tileWidth + gap), rowTop, tileWidth, 0);
-            rowHeight = MAX(rowHeight, [self tank:limits[i] in:tile draw:draw now:now]);
-        }
-        y = rowTop + rowHeight + 8;
-    }
-
-    const tt::CostSummary& c = s.cost;
-    if (c.valid) {
-        // Spend: a row per measure, a column per period.
-        if (draw) [self divider:y];
-        y += 11;
-        const CGFloat labelWidth = 42, columnWidth = (width - labelWidth) / 4;
-        NSString* const heads[4] = {@"TODAY", @"THIS WEEK", @"LAST WEEK", @"30 DAYS"};
-        const tt::DayUsage periods[4] = {c.today, c.window, c.previousWindow, c.last30};
-        const bool known[4] = {true, c.hasWindow, c.hasWindow, true};
-        auto columnRight = [&](int i) { return left + labelWidth + columnWidth * (i + 1); };
-        if (draw)
-            for (int i = 0; i < 4; ++i) DrawRight(heads[i], columnRight(i), y, _head, columnWidth - 2);
-        y += 15;
+    if (NSString* notice = [self noticeText:now]) {
         if (draw) {
-            DrawLeft(@"Cost", left, y + 1.5, _secondary, labelWidth);
-            for (int i = 0; i < 4; ++i)
-                DrawRight(known[i] ? NS(tt::formatUSDShort(periods[i].cost)) : @"—", columnRight(i), y, _title,
-                          columnWidth - 4);
+            FillRounded(NSMakeRect(left, y, width, 28), 8, [NSColor.systemOrangeColor colorWithAlphaComponent:0.14]);
+            DrawSymbol(_warning, NSMakePoint(left + 15, y + 14));
+            DrawLeft(notice, left + 28, y + 6.5, _body, width - 36);
         }
-        y += 19;
+        y += 28 + 14;
+    }
+
+    // Limits: one meter each, session first.
+    if (!_hasData || s.windows.empty()) {
+        if (draw) DrawLeft(_hasData ? @"Usage limits unavailable" : @"Checking your limits…", left, y, _secondary, width);
+        y += 24;
+    }
+    for (size_t i = 0; i < s.windows.size(); ++i) {
+        const LimitRow row = MakeLimitRow(s.windows[i], now);
+        if (i > 0) y += 18;
+        if (draw) {
+            const CGFloat usedWidth = TextWidth(@" used", _secondary);
+            const CGFloat bigWidth = TextWidth(row.usedText, _big);
+            DrawLeft(row.name, left, y + 5, _name, width - bigWidth - usedWidth - 10);
+            DrawLeft(@" used", right - usedWidth, y + 8, _secondary, usedWidth + 1);
+            DrawLeft(row.usedText, right - usedWidth - bigWidth, y, _big, bigWidth + 1);
+        }
+        y += 28;
+        if (draw) [self meter:NSMakeRect(left, y, width, 18) row:row];
+        y += 20;
+        if (draw) {
+            DrawLeft(@"0", left, y, _footnote, 20);
+            DrawCentered(@"50%", left + width * 0.5, y, _footnote);
+            DrawCentered(@"75%", left + width * 0.75, y, _footnote);
+            DrawRight(@"100%", right, y, _footnote, 40);
+        }
+        y += 17;
+        if (draw) {
+            const CGFloat used = DrawLeft(row.status, left, y, Recolored(_bodyStrong, row.statusColor), width / 2);
+            DrawRight(row.resets, right, y, _secondary, width - used - 12);
+        }
+        y += 17;
+        if (row.outlook) {
+            if (draw) {
+                const CGFloat used = DrawLeft(@"At this pace: ", left, y, _secondary, width);
+                DrawLeft(row.outlook, left + used, y, Recolored(_body, row.outlookColor), width - used);
+            }
+            y += 17;
+        }
+    }
+    if (!s.windows.empty()) {
+        y += 8;
+        if (draw) {
+            FillRounded(NSMakeRect(left, y + 2, 2, 11), 1, NSColor.labelColor);
+            DrawLeft(@"Even pace: where you'd be with steady use", left + 8, y, _footnote, width - 8);
+        }
+        y += 15;
+    }
+
+    const uq::CostSummary& c = s.cost;
+    if (c.valid) {
+        y += 12;
+        if (draw) [self separator:y];
+        y += 13;
+
+        // Spending: a column per period.
+        if (draw) DrawLeft(@"Spending", left, y, _name, width);
+        y += 24;
+        const CGFloat labelWidth = 50, column = (width - labelWidth) / 4;
+        NSString* const heads[4] = {@"Today", @"This week", @"Last week", @"30 days"};
+        const uq::DayUsage periods[4] = {c.today, c.window, c.previousWindow, c.last30};
+        const bool known[4] = {true, c.hasWindow, c.hasWindow, true};
+        auto columnRight = [&](int i) { return left + labelWidth + column * (i + 1); };
+        if (draw)
+            for (int i = 0; i < 4; ++i) DrawRight(heads[i], columnRight(i), y, _small, column - 4);
+        y += 16;
+        if (draw) {
+            DrawLeft(@"Cost", left, y, _secondary, labelWidth);
+            for (int i = 0; i < 4; ++i)
+                DrawRight(known[i] ? NS(uq::formatUSDShort(periods[i].cost)) : @"—", columnRight(i), y, _bodyStrong,
+                          column - 4);
+        }
+        y += 18;
         if (draw) {
             DrawLeft(@"Tokens", left, y, _secondary, labelWidth);
             for (int i = 0; i < 4; ++i)
-                DrawRight(known[i] ? NS(tt::formatTokens(double(periods[i].tokens))) : @"—", columnRight(i), y, _body,
-                          columnWidth - 4);
+                DrawRight(known[i] ? NS(uq::formatTokens(double(periods[i].tokens))) : @"—", columnRight(i), y,
+                          _secondary, column - 4);
         }
-        y += 24;
+        y += 28;
 
-        // History.
-        if (draw) {
-            DrawLeft(@"LAST 30 DAYS", left, y, _caption, width / 2);
-            const CGFloat x = [self legend:@"Tokens" color:_tokens right:right y:y];
-            [self legend:@"Cost" color:_cost right:x - 9 y:y];
-        }
-        y += 17;
+        // The last 30 days.
         _chartRect = NSMakeRect(left, y, width, kChartHeight);
         if (draw) [self drawBars];
-        y += kChartHeight + 3;
+        y += kChartHeight + 5;
         if (draw) {
-            DrawLeft(NS(tt::formatShortDate(c.firstDay)), left, y, _tiny, width / 2);
-            DrawRight(@"Today", right, y, _tiny, width / 2);
+            DrawLeft(NS(uq::formatShortDate(c.firstDay)), left, y, _footnote, 60);
+            const CGFloat legendWidth = 11 + TextWidth(@"Cost", _small) + 12 + 11 + TextWidth(@"Tokens", _small);
+            const CGFloat x = [self legend:@"Cost" color:NSColor.systemBlueColor x:round(left + (width - legendWidth) / 2) y:y];
+            [self legend:@"Tokens" color:NSColor.systemOrangeColor x:x + 12 y:y];
+            DrawRight(@"Today", right, y, _footnote, 60);
         }
-        y += 16;
+        y += 22;
 
-        // The hovered day (today by default): totals, then its top two models. Fixed height,
-        // so hovering never resizes the menu.
+        // The hovered day (today by default) and its top two models. Fixed height, so
+        // hovering never resizes the menu.
         const NSInteger day = _hoverDay >= 0 ? _hoverDay : NSInteger(c.days.size()) - 1;
-        const tt::DayUsage& u = c.days[size_t(day)];
-        if (draw) {
-            NSString* when = day == NSInteger(c.days.size()) - 1 ? @"Today" : NS(tt::formatShortDate([self dayStart:day]));
-            const CGFloat used = DrawLeft(when, left, y, _body, width / 2);
-            DrawRight([NSString stringWithFormat:@"%@ · %@ tokens", NS(tt::formatUSD(u.cost)),
-                                                 NS(tt::formatTokens(double(u.tokens)))],
-                      right, y, _body, width - used - 10);
-        }
-        y += 17;
+        const uq::DayUsage& u = c.days[size_t(day)];
         const auto& models = c.dayModels[size_t(day)];
-        for (size_t k = 0; k < models.size(); ++k) {
-            if (draw && !models[k].model.empty()) {
-                const CGFloat used = DrawLeft(NS(tt::modelDisplayName(models[k].model)), left + 10, y, _secondary, width / 2);
-                DrawRight([NSString stringWithFormat:@"%@ · %@", NS(tt::formatUSD(models[k].cost)),
-                                                     NS(tt::formatTokens(double(models[k].tokens)))],
-                          right, y, _secondary, width - used - 20);
-            } else if (draw && k == 0) {
-                DrawLeft(@"No usage this day", left + 10, y, _secondary, width - 10);
-            }
-            y += 15;
-        }
-        y += 7;
+        const CGFloat boxHeight = 10 + 17 + 2 * 16 + 8;
         if (draw) {
-            const CGFloat used = DrawLeft(@"Estimated at API prices from local logs", left, y, _tiny, width);
-            if (!c.topModel.empty())
-                DrawRight([@"Top: " stringByAppendingString:NS(tt::modelDisplayName(c.topModel))], right, y, _tiny,
-                          width - used - 10);
+            FillRounded(NSMakeRect(left, y, width, boxHeight), 8, Tint(0.05));
+            NSString* when = day == NSInteger(c.days.size()) - 1 ? @"Today" : NS(uq::formatShortDate([self dayStart:day]));
+            const CGFloat used = DrawLeft(when, left + 10, y + 10, _bodyStrong, width / 2);
+            DrawRight([NSString stringWithFormat:@"%@ · %@ tokens", NS(uq::formatUSD(u.cost)),
+                                                 NS(uq::formatTokens(double(u.tokens)))],
+                      right - 10, y + 10, _body, width - used - 30);
+            CGFloat my = y + 10 + 18;
+            for (size_t k = 0; k < models.size(); ++k, my += 16) {
+                if (!models[k].model.empty()) {
+                    const CGFloat w = DrawLeft(NS(uq::modelDisplayName(models[k].model)), left + 10, my, _secondary, width / 2);
+                    DrawRight([NSString stringWithFormat:@"%@ · %@", NS(uq::formatUSD(models[k].cost)),
+                                                         NS(uq::formatTokens(double(models[k].tokens)))],
+                              right - 10, my, _secondary, width - w - 30);
+                } else if (k == 0) {
+                    DrawLeft(@"No usage this day", left + 10, my, _secondary, width - 20);
+                }
+            }
         }
-        y += 13;
+        y += boxHeight;
     }
-    return ceil(y + 8);
+
+    // Footer: name, plan and disk use, then Settings and Quit.
+    y += 14;
+    if (draw) [self separator:y];
+    y += 9;
+    _quitRect = NSMakeRect(right - 26, y, 26, 26);
+    _settingsRect = NSMakeRect(right - 56, y, 26, 26);
+    if (draw) {
+        NSMutableArray<NSString*>* facts = [NSMutableArray array];
+        if (!s.account.plan.empty()) [facts addObject:NS(s.account.plan)];
+        if (s.storage.valid) [facts addObject:[NS(uq::formatBytes(s.storage.total)) stringByAppendingString:@" on disk"]];
+        const CGFloat used = DrawLeft(kAppName, left, y + 5, _name, 80);
+        DrawLeft([@"  " stringByAppendingString:[facts componentsJoinedByString:@" · "]], left + used, y + 6, _secondary,
+                 NSMinX(_settingsRect) - left - used - 6);
+        if (_hoverButton == kSettingsButton) FillRounded(_settingsRect, 6, Tint(0.10));
+        if (_hoverButton == kQuitButton) FillRounded(_quitRect, 6, Tint(0.10));
+        DrawSymbol(_hoverButton == kSettingsButton ? _gearHot : _gear, NSMakePoint(NSMidX(_settingsRect), NSMidY(_settingsRect)));
+        DrawSymbol(_hoverButton == kQuitButton ? _powerHot : _power, NSMakePoint(NSMidX(_quitRect), NSMidY(_quitRect)));
+    }
+    y += 26;
+    return ceil(y + 10);
 }
 
 - (void)updateTrackingAreas {
@@ -640,10 +566,20 @@ static NSImage* GaugeIcon(double leftFraction) {
     [self setNeedsDisplay:YES];
 }
 
+- (NSInteger)buttonAt:(NSPoint)p {
+    if (NSPointInRect(p, _settingsRect)) return kSettingsButton;
+    if (NSPointInRect(p, _quitRect)) return kQuitButton;
+    return kNoButton;
+}
+
 - (void)mouseMoved:(NSEvent*)event {
-    if (!_snap.cost.valid) return;
     const NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];  // flipped: y grows down
-    if (p.y > NSMaxY(_chartRect) + 10) return;  // below the bars: keep the day so its details can be read
+    const NSInteger button = [self buttonAt:p];
+    if (button != _hoverButton) {
+        _hoverButton = button;
+        [self setNeedsDisplay:YES];
+    }
+    if (!_snap.cost.valid || p.y > NSMaxY(_chartRect) + 10) return;  // below the bars: keep the day
     NSInteger day = -1;
     if (NSPointInRect(p, NSInsetRect(_chartRect, -2, -10))) {
         const CGFloat slot = _chartRect.size.width / _snap.cost.days.size();
@@ -654,34 +590,43 @@ static NSImage* GaugeIcon(double leftFraction) {
 }
 
 - (void)mouseExited:(NSEvent*)event {
+    _hoverButton = kNoButton;
     [self setHoverDay:-1];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseDown:(NSEvent*)event {
+    const NSInteger button = [self buttonAt:[self convertPoint:event.locationInWindow fromView:nil]];
+    if (button == kSettingsButton) [self.actions cardOpenSettings];
+    if (button == kQuitButton) [self.actions cardQuit];
 }
 
 - (void)clearHover {
     _hoverDay = -1;
+    _hoverButton = kNoButton;
 }
 
 @end
 
 // MARK: - App
 
-@interface TTAppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
+@interface UQAppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate, UQCardActions>
 @end
 
-@implementation TTAppDelegate {
+@implementation UQAppDelegate {
     NSStatusItem* _statusItem;
     NSMenu* _menu;
+    NSMenu* _settingsMenu;
     NSMenuItem* _cardItem;
-    TTCardView* _card;
-    NSMenuItem* _storageItem;
+    UQCardView* _card;
     NSMenuItem* _loginItem;
     NSMutableArray<NSMenuItem*>* _intervalItems;
     NSTimer* _refreshTimer;
     NSTimer* _clockTimer;
     dispatch_queue_t _queue;
-    tt::Engine* _engine;
-    tt::Snapshot _snapshot;
-    double _iconLevel;  // remaining fraction the menu bar glyph shows; -1 = unknown
+    uq::Engine* _engine;
+    uq::Snapshot _snapshot;
+    NSString* _glyphKey;
     BOOL _refreshing, _pending, _pendingStorage;
     BOOL _menuOpen;
 }
@@ -692,23 +637,22 @@ static NSImage* GaugeIcon(double leftFraction) {
         [NSApp terminate:nil];  // already running
         return;
     }
-    _engine = new tt::Engine();
-    _queue = dispatch_queue_create("tokentank.refresh",
+    _engine = new uq::Engine();
+    _queue = dispatch_queue_create("usageq.refresh",
                                    dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
     _intervalItems = [NSMutableArray array];
 
     _statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
-    _iconLevel = -2;  // forces the first glyph
     _statusItem.button.imagePosition = NSImageLeading;
     _statusItem.button.font = [NSFont monospacedDigitSystemFontOfSize:0 weight:NSFontWeightRegular];
     _statusItem.button.title = @"–";
     [self updateStatusItem];
-    [self buildMenu];
+    [self buildMenus];
     _statusItem.menu = _menu;
 
     [self configureLoginItemOnFirstRun];
     [self scheduleRefreshTimer];
-    __weak TTAppDelegate* weakSelf = self;
+    __weak UQAppDelegate* weakSelf = self;
     [NSWorkspace.sharedWorkspace.notificationCenter
         addObserverForName:NSWorkspaceDidWakeNotification
                     object:nil
@@ -719,7 +663,7 @@ static NSImage* GaugeIcon(double leftFraction) {
                     });
                 }];
     [self refreshMeasuringStorage:NO];
-#ifdef TT_DEV
+#ifdef UQ_DEV
     NSArray<NSString*>* args = NSProcessInfo.processInfo.arguments;
     const NSUInteger soak = [args indexOfObject:@"--soak"];
     if (soak != NSNotFound && soak + 1 < args.count)
@@ -729,55 +673,55 @@ static NSImage* GaugeIcon(double leftFraction) {
 #endif
 }
 
-// MARK: Menu
+// MARK: Menus
 
-- (void)buildMenu {
-    _menu = [[NSMenu alloc] initWithTitle:@"TokenTank"];
+- (void)buildMenus {
+    _menu = [[NSMenu alloc] initWithTitle:kAppName];
     _menu.delegate = self;
     _menu.autoenablesItems = NO;
-
-    _card = [[TTCardView alloc] initWithFrame:NSMakeRect(0, 0, kCardWidth, 80)];
+    _card = [[UQCardView alloc] initWithFrame:NSMakeRect(0, 0, kCardWidth, 80)];
+    _card.actions = self;
     [_card setFrameSize:NSMakeSize(kCardWidth, [_card preferredHeight])];
     _cardItem = [NSMenuItem new];
     _cardItem.view = _card;
     [_menu addItem:_cardItem];
-    [_menu addItem:NSMenuItem.separatorItem];
+    // The card draws its own buttons; these keep ⌘, and ⌘Q working while the menu is open.
+    NSMenuItem* settingsKey = [[NSMenuItem alloc] initWithTitle:@"Settings" action:@selector(openSettings:) keyEquivalent:@","];
+    NSMenuItem* quitKey = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(quit:) keyEquivalent:@"q"];
+    for (NSMenuItem* item in @[ settingsKey, quitKey ]) {
+        item.target = self;
+        item.hidden = YES;
+        item.allowsKeyEquivalentWhenHidden = YES;
+        [_menu addItem:item];
+    }
 
-    _storageItem = [[NSMenuItem alloc] initWithTitle:@"Storage" action:@selector(revealClaudeFolder:) keyEquivalent:@""];
-    _storageItem.target = self;
-    _storageItem.toolTip = @"Disk used by Claude Code. Click to show ~/.claude in Finder.";
-    [_menu addItem:_storageItem];
-    [self updateStorageItem];
-    [_menu addItem:NSMenuItem.separatorItem];
-
-    NSMenuItem* settings = [[NSMenuItem alloc] initWithTitle:@"Settings" action:nil keyEquivalent:@""];
-    settings.submenu = [self buildSettingsMenu];
-    [_menu addItem:settings];
-    NSMenuItem* quit = [[NSMenuItem alloc] initWithTitle:@"Quit" action:@selector(quit:) keyEquivalent:@"q"];
-    quit.target = self;
-    [_menu addItem:quit];
-}
-
-- (NSMenu*)buildSettingsMenu {
-    NSMenu* menu = [[NSMenu alloc] initWithTitle:@"Settings"];
-    menu.autoenablesItems = NO;
+    _settingsMenu = [[NSMenu alloc] initWithTitle:@"Settings"];
+    _settingsMenu.autoenablesItems = NO;
     NSMenuItem* header = [[NSMenuItem alloc] initWithTitle:@"Refresh Every" action:nil keyEquivalent:@""];
     header.enabled = NO;
-    [menu addItem:header];
+    [_settingsMenu addItem:header];
     for (NSInteger minutes : {1, 2, 5, 15}) {
         NSString* title = minutes == 1 ? @"1 minute" : [NSString stringWithFormat:@"%ld minutes", long(minutes)];
         NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:title action:@selector(setRefreshInterval:) keyEquivalent:@""];
         item.target = self;
         item.tag = minutes;
         item.indentationLevel = 1;
-        [menu addItem:item];
+        [_settingsMenu addItem:item];
         [_intervalItems addObject:item];
     }
-    [menu addItem:NSMenuItem.separatorItem];
+    [_settingsMenu addItem:NSMenuItem.separatorItem];
     _loginItem = [[NSMenuItem alloc] initWithTitle:@"Launch at Login" action:@selector(toggleLaunchAtLogin:) keyEquivalent:@""];
     _loginItem.target = self;
-    [menu addItem:_loginItem];
-    return menu;
+    [_settingsMenu addItem:_loginItem];
+    NSMenuItem* reveal = [[NSMenuItem alloc] initWithTitle:@"Show Claude Code Data in Finder"
+                                                    action:@selector(revealClaudeFolder:)
+                                             keyEquivalent:@""];
+    reveal.target = self;
+    [_settingsMenu addItem:reveal];
+    [_settingsMenu addItem:NSMenuItem.separatorItem];
+    NSMenuItem* quit = [[NSMenuItem alloc] initWithTitle:@"Quit Usage?" action:@selector(quit:) keyEquivalent:@"q"];
+    quit.target = self;
+    [_settingsMenu addItem:quit];
 }
 
 - (void)updateSettingsState {
@@ -787,37 +731,27 @@ static NSImage* GaugeIcon(double leftFraction) {
                                                                                        : NSControlStateValueOff;
 }
 
-- (void)updateStorageItem {
-    NSFont* font = [NSFont menuFontOfSize:0];
-    NSMutableAttributedString* title =
-        [[NSMutableAttributedString alloc] initWithString:@"Storage" attributes:@{NSFontAttributeName : font}];
-    NSString* size = _snapshot.storage.valid ? NS(tt::formatBytes(_snapshot.storage.total)) : @"…";
-    [title appendAttributedString:[[NSAttributedString alloc] initWithString:[@"  " stringByAppendingString:size]
-                                                                  attributes:TextStyle(font, NSColor.secondaryLabelColor)]];
-    _storageItem.attributedTitle = title;
-}
-
-// Menu bar: a small fuel gauge and the session's remaining share.
+// Menu bar: two capsules (session, weekly) and the session's used share.
 - (void)updateStatusItem {
-    const int64_t now = tt::nowSeconds();
-    const tt::LimitWindow* w = tt::primaryWindow(_snapshot.windows);
-    double left = -1;
-    NSString* tip = @"TokenTank: Claude usage";
-    if (w) {
-        const tt::LimitWindow e = tt::effectiveWindow(*w, now);
-        left = std::clamp(100.0 - e.usedPercent, 0.0, 100.0);
-        tip = e.resetsAt ? [NSString stringWithFormat:@"%@: %@ left · refills %@", NS(e.title),
-                                                      NS(tt::formatPercent(left)), ClockTime(e.resetsAt, now)]
-                         : [NSString stringWithFormat:@"%@: %@ left", NS(e.title), NS(tt::formatPercent(left))];
+    const int64_t now = uq::nowSeconds();
+    double session = -1, weekly = -1;
+    NSMutableArray<NSString*>* tips = [NSMutableArray array];
+    for (const uq::LimitWindow& raw : _snapshot.windows) {
+        const uq::LimitWindow w = uq::effectiveWindow(raw, now);
+        const double used = std::clamp(w.usedPercent, 0.0, 100.0);
+        if (w.isSession && session < 0) session = used;
+        else if (!w.isSession && weekly < 0) weekly = used;
+        [tips addObject:[NSString stringWithFormat:@"%@: %@ used", NS(w.title), NS(uq::formatPercent(used))]];
     }
-    const double level = left < 0 ? -1 : std::round(left) / 100.0;
-    if (level != _iconLevel) {
-        _iconLevel = level;
-        _statusItem.button.image = GaugeIcon(level);
+    const double shown = session >= 0 ? session : weekly;
+    NSString* key = [NSString stringWithFormat:@"%.0f/%.0f", session, weekly];
+    if (![key isEqualToString:_glyphKey]) {
+        _glyphKey = key;
+        _statusItem.button.image = MeterGlyph(session / 100.0, weekly / 100.0);
     }
-    NSString* title = left < 0 ? @"–" : NS(tt::formatPercent(left));
+    NSString* title = shown < 0 ? @"–" : NS(uq::formatPercent(shown));
     if (![_statusItem.button.title isEqualToString:title]) _statusItem.button.title = title;
-    _statusItem.button.toolTip = tip;
+    _statusItem.button.toolTip = tips.count ? [tips componentsJoinedByString:@"\n"] : kAppName;
 }
 
 - (void)resizeCard {
@@ -830,7 +764,6 @@ static NSImage* GaugeIcon(double leftFraction) {
 
 - (void)menuNeedsUpdate:(NSMenu*)menu {
     if (menu != _menu) return;
-    [self updateSettingsState];
     [self resizeCard];
     [_card setNeedsDisplay:YES];
 }
@@ -838,9 +771,9 @@ static NSImage* GaugeIcon(double leftFraction) {
 - (void)menuWillOpen:(NSMenu*)menu {
     if (menu != _menu) return;
     _menuOpen = YES;
-    // Every click checks for fresh numbers (the engine spaces out API calls) and measures storage.
+    // Every click checks for fresh numbers (the engine spaces out API calls) and measures disk use.
     [self refreshMeasuringStorage:YES];
-    __weak TTCardView* card = _card;
+    __weak UQCardView* card = _card;
     _clockTimer = [NSTimer timerWithTimeInterval:15
                                          repeats:YES
                                            block:^(NSTimer*) {
@@ -857,6 +790,29 @@ static NSImage* GaugeIcon(double leftFraction) {
     [_card clearHover];
 }
 
+// MARK: Card actions
+
+- (void)cardOpenSettings {
+    [self openSettings:nil];
+}
+
+- (void)cardQuit {
+    [NSApp terminate:nil];
+}
+
+- (void)openSettings:(id)sender {
+    [_menu cancelTracking];
+    __weak UQAppDelegate* weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UQAppDelegate* strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf updateSettingsState];
+        NSStatusBarButton* button = strongSelf->_statusItem.button;
+        const NSPoint below = NSMakePoint(0, button.isFlipped ? NSMaxY(button.bounds) + 5 : -5);
+        [strongSelf->_settingsMenu popUpMenuPositioningItem:nil atLocation:below inView:button];
+    });
+}
+
 // MARK: Refresh
 
 - (void)refreshMeasuringStorage:(BOOL)storage {
@@ -866,14 +822,14 @@ static NSImage* GaugeIcon(double leftFraction) {
         return;
     }
     _refreshing = YES;
-    tt::Engine* engine = _engine;
-    __weak TTAppDelegate* weakSelf = self;
+    uq::Engine* engine = _engine;
+    __weak UQAppDelegate* weakSelf = self;
     dispatch_async(_queue, ^{
-        engine->refresh(tt::nowSeconds(), storage);
-        const tt::Snapshot snapshot = engine->snapshot();
+        engine->refresh(uq::nowSeconds(), storage);
+        const uq::Snapshot snapshot = engine->snapshot();
         malloc_zone_pressure_relief(nullptr, 0);  // hand scan buffers back to the system
         dispatch_async(dispatch_get_main_queue(), ^{
-            TTAppDelegate* strongSelf = weakSelf;
+            UQAppDelegate* strongSelf = weakSelf;
             if (!strongSelf) return;
             strongSelf->_refreshing = NO;
             [strongSelf apply:snapshot];
@@ -886,12 +842,11 @@ static NSImage* GaugeIcon(double leftFraction) {
     });
 }
 
-- (void)apply:(const tt::Snapshot&)snapshot {
+- (void)apply:(const uq::Snapshot&)snapshot {
     _snapshot = snapshot;
     [_card showSnapshot:snapshot];
     [self resizeCard];
     [self updateStatusItem];
-    [self updateStorageItem];
 }
 
 - (NSInteger)refreshMinutes {
@@ -902,7 +857,7 @@ static NSImage* GaugeIcon(double leftFraction) {
 - (void)scheduleRefreshTimer {
     [_refreshTimer invalidate];
     const NSTimeInterval interval = [self refreshMinutes] * 60.0;
-    __weak TTAppDelegate* weakSelf = self;
+    __weak UQAppDelegate* weakSelf = self;
     _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:interval
                                                     repeats:YES
                                                       block:^(NSTimer*) {
@@ -926,7 +881,7 @@ static NSImage* GaugeIcon(double leftFraction) {
         [service unregisterAndReturnError:&error];
     else
         [service registerAndReturnError:&error];
-    if (error) NSLog(@"TokenTank: launch at login: %@", error.localizedDescription);
+    if (error) NSLog(@"Usage?: launch at login: %@", error.localizedDescription);
     [self updateSettingsState];
 }
 
@@ -936,7 +891,7 @@ static NSImage* GaugeIcon(double leftFraction) {
     NSError* error = nil;
     if (SMAppService.mainAppService.status != SMAppServiceStatusEnabled)
         [SMAppService.mainAppService registerAndReturnError:&error];
-    if (error) NSLog(@"TokenTank: launch at login: %@", error.localizedDescription);
+    if (error) NSLog(@"Usage?: launch at login: %@", error.localizedDescription);
     [defaults setBool:YES forKey:kLoginConfiguredKey];
 }
 
@@ -949,7 +904,7 @@ static NSImage* GaugeIcon(double leftFraction) {
     [NSApp terminate:nil];
 }
 
-#ifdef TT_DEV
+#ifdef UQ_DEV
 // Soak test for leaks and growth: each cycle runs a full refresh (log scan, storage, limits;
 // the engine still spaces out API calls), opens and closes the menu, then lets the run loop idle
 // briefly, like real use.
@@ -968,10 +923,10 @@ static NSImage* GaugeIcon(double leftFraction) {
         return;
     }
     @autoreleasepool {
-        tt::Engine* engine = _engine;
-        __block tt::Snapshot snapshot;
+        uq::Engine* engine = _engine;
+        __block uq::Snapshot snapshot;
         dispatch_sync(_queue, ^{
-            engine->refresh(tt::nowSeconds(), true);
+            engine->refresh(uq::nowSeconds(), true);
             snapshot = engine->snapshot();
             malloc_zone_pressure_relief(nullptr, 0);
         });
@@ -986,7 +941,7 @@ static NSImage* GaugeIcon(double leftFraction) {
         [_menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, 0) inView:_statusItem.button];
     }
     if (i % 10 == 0) printf("cycle %3d: %.1f MB\n", i, FootprintMB());
-    __weak TTAppDelegate* weakSelf = self;
+    __weak UQAppDelegate* weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 4), dispatch_get_main_queue(), ^{
         [weakSelf soakStep:i + 1 of:cycles];
     });
@@ -997,24 +952,21 @@ static NSImage* GaugeIcon(double leftFraction) {
 
 // MARK: - Entry
 
-#ifdef TT_DEV
+#ifdef UQ_DEV
 // Made-up numbers for screenshots, so no real account data ever lands in docs.
-static tt::Snapshot DemoSnapshot(int64_t now, int tiles) {
-    tt::Snapshot s;
+static uq::Snapshot DemoSnapshot(int64_t now) {
+    uq::Snapshot s;
     s.updatedAt = now - 20;
     s.account = {"you@example.com", "Max 20x"};
     s.windows = {
-        {"Session", 38, (now + 2 * 3600 + 41 * 60) / 60 * 60, 300, true},
-        {"Weekly", 47, (now + 4 * 86400 + 3 * 3600) / 3600 * 3600, 10080, false},
-        {"Opus weekly", 96, (now + 4 * 86400 + 3 * 3600) / 3600 * 3600, 10080, false},
-        {"Sonnet weekly", 12, (now + 4 * 86400 + 3 * 3600) / 3600 * 3600, 10080, false},
+        {"Session", 38, (now + 2 * 3600 + 29 * 60) / 60 * 60, 300, true},
+        {"Fable weekly", 52, (now + 4 * 86400 + 1 * 3600 + 44 * 60) / 60 * 60, 10080, false},
     };
-    s.windows.resize(size_t(std::clamp(tiles, 1, 4)));
-    tt::CostSummary& c = s.cost;
+    uq::CostSummary& c = s.cost;
     c.valid = true;
-    c.firstDay = tt::localMidnight(now, -29);
+    c.firstDay = uq::localMidnight(now, -29);
     for (int i = 0; i < 30; ++i) {
-        const int64_t day = tt::localMidnight(c.firstDay + int64_t(i) * 86400 + 43200);
+        const int64_t day = uq::localMidnight(c.firstDay + int64_t(i) * 86400 + 43200);
         time_t t = time_t(day);
         struct tm tm;
         localtime_r(&t, &tm);
@@ -1025,8 +977,8 @@ static tt::Snapshot DemoSnapshot(int64_t now, int tiles) {
         c.days[size_t(i)] = {cost, tokens};
         if (cost > 0) {
             c.dayModels[size_t(i)][0] = {"claude-opus-5-5", cost * 0.78, uint64_t(tokens * 0.74)};
-            c.dayModels[size_t(i)][1] = i % 3 ? tt::ModelUsage{"claude-sonnet-5-5", cost * 0.17, uint64_t(tokens * 0.21)}
-                                              : tt::ModelUsage{"claude-fable-5-1", cost * 0.19, uint64_t(tokens * 0.06)};
+            c.dayModels[size_t(i)][1] = i % 3 ? uq::ModelUsage{"claude-sonnet-5-5", cost * 0.17, uint64_t(tokens * 0.21)}
+                                              : uq::ModelUsage{"claude-fable-5-1", cost * 0.19, uint64_t(tokens * 0.06)};
         }
         c.last30 += c.days[size_t(i)];
         if (i >= 25) c.window += c.days[size_t(i)];
@@ -1041,80 +993,10 @@ static tt::Snapshot DemoSnapshot(int64_t now, int tiles) {
     return s;
 }
 
-// `TokenTank --render out.png [--dark] [--day N] [--demo | --tiles 1-4]` draws the menu with live
-// (or made-up demo) data to a PNG, optionally with day N (0-29, 29 = today) hovered.
-static int RenderMenu(NSString* path, BOOL dark, NSInteger hoverDay, int demoTiles) {
-    tt::Snapshot snapshot;
-    if (demoTiles > 0) {
-        snapshot = DemoSnapshot(tt::nowSeconds(), demoTiles);
-    } else {
-        tt::Engine engine;
-        engine.refresh(tt::nowSeconds(), true);
-        snapshot = engine.snapshot();
-    }
-    TTCardView* view = [[TTCardView alloc] initWithFrame:NSMakeRect(0, 0, kCardWidth, 80)];
-    [view showSnapshot:snapshot];
-    [view setHoverDay:hoverDay];
-    const CGFloat cardHeight = [view preferredHeight];
-    [view setFrameSize:NSMakeSize(kCardWidth, cardHeight)];
-    NSAppearance* appearance = [NSAppearance appearanceNamed:dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
-    view.appearance = appearance;
-
-    // The card plus the menu items under it, on a menu-like rounded panel.
-    const CGFloat rows = 3 * 22 + 2 * 11 + 10, height = cardHeight + rows, inset = 6;
+static NSBitmapImageRep* Bitmap(CGFloat w, CGFloat h, CGFloat scale) {
     NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
-                                                                    pixelsWide:NSInteger(kCardWidth * 2)
-                                                                    pixelsHigh:NSInteger(height * 2)
-                                                                 bitsPerSample:8
-                                                               samplesPerPixel:4
-                                                                      hasAlpha:YES
-                                                                      isPlanar:NO
-                                                                colorSpaceName:NSCalibratedRGBColorSpace
-                                                                   bytesPerRow:0
-                                                                  bitsPerPixel:0];
-    rep.size = NSMakeSize(kCardWidth, height);
-    NSGraphicsContext* bitmap = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
-    CGContextRef cg = bitmap.CGContext;
-    CGContextTranslateCTM(cg, 0, height);
-    CGContextScaleCTM(cg, 1, -1);
-    [NSGraphicsContext saveGraphicsState];
-    NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithCGContext:cg flipped:YES];
-    [appearance performAsCurrentDrawingAppearance:^{
-        [(dark ? SRGB(0x2b2b2b) : SRGB(0xececec)) setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0, 0, kCardWidth, height) xRadius:12 yRadius:12] fill];
-        [view drawRect:view.bounds];
-        NSFont* font = [NSFont menuFontOfSize:0];
-        NSDictionary* item = TextStyle(font, NSColor.labelColor);
-        NSDictionary* dim = TextStyle(font, NSColor.secondaryLabelColor);
-        CGFloat y = cardHeight + 5;
-        auto separator = [&] {
-            [NSColor.separatorColor setFill];
-            NSRectFill(NSMakeRect(kPad, y, kCardWidth - 2 * kPad, 1));
-            y += 6;
-        };
-        separator();
-        const CGFloat used = DrawLeft(@"Storage", kPad, y + 2, item, 200);
-        DrawLeft(NS(tt::formatBytes(snapshot.storage.total)), kPad + used + 8, y + 2, dim, 120);
-        y += 22 + 5;
-        separator();
-        DrawLeft(@"Settings", kPad, y + 2, item, 200);
-        DrawRight(@"›", kCardWidth - kPad - inset, y + 1, item, 20);
-        y += 22;
-        DrawLeft(@"Quit", kPad, y + 2, item, 200);
-        DrawRight(@"⌘Q", kCardWidth - kPad - inset, y + 2, dim, 60);
-    }];
-    [NSGraphicsContext restoreGraphicsState];
-    NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
-    return [png writeToFile:path atomically:YES] ? 0 : 1;
-}
-
-// `TokenTank --render-bar out.png [--dark]`: the menu bar item (gauge + remaining share) on a
-// menu-bar-like strip, with demo values.
-static int RenderBar(NSString* path, BOOL dark) {
-    const CGFloat w = 92, h = 26;
-    NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
-                                                                    pixelsWide:NSInteger(w * 4)
-                                                                    pixelsHigh:NSInteger(h * 4)
+                                                                    pixelsWide:NSInteger(w * scale)
+                                                                    pixelsHigh:NSInteger(h * scale)
                                                                  bitsPerSample:8
                                                                samplesPerPixel:4
                                                                       hasAlpha:YES
@@ -1123,12 +1005,61 @@ static int RenderBar(NSString* path, BOOL dark) {
                                                                    bytesPerRow:0
                                                                   bitsPerPixel:0];
     rep.size = NSMakeSize(w, h);
+    return rep;
+}
+
+static int WritePNG(NSBitmapImageRep* rep, NSString* path) {
+    NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    return [png writeToFile:path atomically:YES] ? 0 : 1;
+}
+
+// `UsageQ --render out.png [--dark] [--day N] [--demo] [--stale]` draws the menu card with live (or
+// demo) data, optionally with day N (0-29, 29 = today) hovered.
+static int RenderCard(NSString* path, BOOL dark, NSInteger hoverDay, BOOL demo, BOOL stale) {
+    uq::Snapshot snapshot;
+    if (demo) {
+        snapshot = DemoSnapshot(uq::nowSeconds());
+        if (stale) {
+            snapshot.notice = "Offline";
+            snapshot.updatedAt = uq::nowSeconds() - 12 * 60;
+        }
+    } else {
+        uq::Engine engine;
+        engine.refresh(uq::nowSeconds(), true);
+        snapshot = engine.snapshot();
+    }
+    UQCardView* view = [[UQCardView alloc] initWithFrame:NSMakeRect(0, 0, kCardWidth, 80)];
+    [view showSnapshot:snapshot];
+    [view setHoverDay:hoverDay];
+    const CGFloat height = [view preferredHeight];
+    [view setFrameSize:NSMakeSize(kCardWidth, height)];
+    NSAppearance* appearance = [NSAppearance appearanceNamed:dark ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+    view.appearance = appearance;
+    NSBitmapImageRep* rep = Bitmap(kCardWidth, height, 2);
+    CGContextRef cg = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep].CGContext;
+    CGContextTranslateCTM(cg, 0, height);
+    CGContextScaleCTM(cg, 1, -1);
+    [NSGraphicsContext saveGraphicsState];
+    NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithCGContext:cg flipped:YES];
+    [appearance performAsCurrentDrawingAppearance:^{
+        [[NSColor colorWithSRGBRed:dark ? 0.165 : 0.937 green:dark ? 0.165 : 0.937 blue:dark ? 0.17 : 0.94 alpha:1] setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0, 0, kCardWidth, height) xRadius:12 yRadius:12] fill];
+        [view drawRect:view.bounds];
+    }];
+    [NSGraphicsContext restoreGraphicsState];
+    return WritePNG(rep, path);
+}
+
+// `UsageQ --render-bar out.png [--dark]`: the menu bar item on a menu-bar-like strip.
+static int RenderBar(NSString* path, BOOL dark) {
+    const CGFloat w = 84, h = 26;
+    NSBitmapImageRep* rep = Bitmap(w, h, 4);
     [NSGraphicsContext saveGraphicsState];
     NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep];
     NSColor* ink = dark ? NSColor.whiteColor : NSColor.blackColor;
-    [(dark ? SRGB(0x1e1e1e) : SRGB(0xf0f0f0)) setFill];
+    [[NSColor colorWithWhite:dark ? 0.12 : 0.94 alpha:1] setFill];
     [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0, 0, w, h) xRadius:7 yRadius:7] fill];
-    NSImage* glyph = GaugeIcon(0.62);
+    NSImage* glyph = MeterGlyph(0.38, 0.52);
     NSImage* tinted = [NSImage imageWithSize:glyph.size
                                      flipped:NO
                               drawingHandler:^BOOL(NSRect r) {
@@ -1138,35 +1069,32 @@ static int RenderBar(NSString* path, BOOL dark) {
                                   return YES;
                               }];
     NSDictionary* text = TextStyle([NSFont monospacedDigitSystemFontOfSize:13 weight:NSFontWeightRegular], ink);
-    const CGFloat textWidth = TextWidth(@"62%", text);
-    const CGFloat x = round((w - (18 + 4 + textWidth)) / 2);
-    [tinted drawInRect:NSMakeRect(x, (h - 16) / 2, 18, 16)];
-    [@"62%" drawAtPoint:NSMakePoint(x + 22, (h - 16) / 2 - 0.5) withAttributes:text];
+    const CGFloat x = round((w - (15 + 5 + TextWidth(@"38%", text))) / 2);
+    [tinted drawInRect:NSMakeRect(x, (h - 13) / 2, 15, 13)];
+    [@"38%" drawAtPoint:NSMakePoint(x + 20, (h - 16) / 2 - 0.5) withAttributes:text];
     [NSGraphicsContext restoreGraphicsState];
-    NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
-    return [png writeToFile:path atomically:YES] ? 0 : 1;
+    return WritePNG(rep, path);
 }
 #endif
 
 int main(int argc, const char* argv[]) {
     @autoreleasepool {
-#ifdef TT_DEV
+#ifdef UQ_DEV
         if (argc >= 3 && !strcmp(argv[1], "--render-bar")) return RenderBar(@(argv[2]), argc >= 4 && !strcmp(argv[3], "--dark"));
         if (argc >= 3 && !strcmp(argv[1], "--render")) {
-            BOOL dark = NO;
-            int demoTiles = 0;
+            BOOL dark = NO, demo = NO, stale = NO;
             NSInteger day = -1;
             for (int i = 3; i < argc; ++i) {
                 if (!strcmp(argv[i], "--dark")) dark = YES;
-                if (!strcmp(argv[i], "--demo")) demoTiles = 2;
-                if (!strcmp(argv[i], "--tiles") && i + 1 < argc) demoTiles = atoi(argv[++i]);
+                if (!strcmp(argv[i], "--demo")) demo = YES;
+                if (!strcmp(argv[i], "--stale")) stale = YES;
                 if (!strcmp(argv[i], "--day") && i + 1 < argc) day = atoi(argv[++i]);
             }
-            return RenderMenu(@(argv[2]), dark, day, demoTiles);
+            return RenderCard(@(argv[2]), dark, day, demo, stale);
         }
 #endif
         NSApplication* app = NSApplication.sharedApplication;
-        TTAppDelegate* delegate = [TTAppDelegate new];
+        UQAppDelegate* delegate = [UQAppDelegate new];
         app.delegate = delegate;
         app.activationPolicy = NSApplicationActivationPolicyAccessory;
         [app run];
