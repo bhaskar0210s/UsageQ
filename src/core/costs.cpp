@@ -522,15 +522,24 @@ CostSummary CostScanner::summarize(int64_t now, int64_t windowEnd) const {
         s.window = sumRange(s.windowStart, windowEnd);
         s.previousWindow = sumRange(s.windowStart - 7 * 86400, s.windowStart);
     }
-    double best = 0;
-    for (size_t m = 0; m < models_.size(); ++m) {
-        double cost = 0;
-        for (int d = today - 29; d <= today; ++d) cost += modelCost_[m * kDays + size_t(d)];
-        if (cost > best) {
-            best = cost;
-            s.topModel = models_[m].name;
+    for (size_t m = 0; m < models_.size(); ++m) {  // the top two over the whole 30 days
+        ModelUsage u{models_[m].name, 0, 0};
+        for (int d = today - 29; d <= today; ++d) {
+            u.cost += modelCost_[m * kDays + size_t(d)];
+            u.tokens += modelTokens_[m * kDays + size_t(d)];
+        }
+        if (u.cost <= 0 && u.tokens == 0) continue;
+        auto beats = [&u](const ModelUsage& o) {
+            return o.model.empty() || u.cost > o.cost || (u.cost == o.cost && u.tokens > o.tokens);
+        };
+        if (beats(s.topModels[0])) {
+            s.topModels[1] = std::move(s.topModels[0]);
+            s.topModels[0] = u;
+        } else if (beats(s.topModels[1])) {
+            s.topModels[1] = u;
         }
     }
+    s.topModel = s.topModels[0].model;
     s.messages = messages_;
     s.unpricedModels = unpriced_;
     return s;

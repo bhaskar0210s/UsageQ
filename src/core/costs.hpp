@@ -41,7 +41,8 @@ struct CostSummary {
     bool hasWindow = false;            // a weekly limit window is known
     int64_t windowStart = 0, windowEnd = 0;
     DayUsage window, previousWindow;
-    std::string topModel;              // by cost over the last 30 days
+    std::array<ModelUsage, 2> topModels{};  // top two models over the last 30 days, by cost
+    std::string topModel;              // topModels[0].model
     uint64_t messages = 0;             // deduplicated API responses in the scanned range
     bool unpricedModels = false;       // tokens from a model with no known price
 };

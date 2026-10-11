@@ -17,7 +17,7 @@ CORE     := $(wildcard src/core/*.cpp)
 CORE_OBJ := $(CORE:src/%.cpp=$(BUILD)/obj/%.o)
 HEADERS  := $(wildcard src/core/*.hpp)
 
-.PHONY: all app cli dev leakcheck install uninstall run clean
+.PHONY: all app cli dev leakcheck clicktest install uninstall run clean
 
 all: app cli
 
@@ -49,7 +49,7 @@ $(BUNDLE): $(CORE_OBJ) $(BUILD)/obj/app/main.o $(BUILD)/usageq Info.plist resour
 	codesign --force --sign - $@/Contents/Helpers/usageq
 	codesign --force --sign - $@
 
-# Dev build: debuggable, with test hooks (--soak N, --render out.png [--dark]).
+# Dev build: debuggable, with test hooks (--soak N, --click-test, --render out.png [--dark]).
 DEV := $(BUILD)/dev/$(APP).app
 dev: $(CORE_OBJ) $(BUILD)/usageq src/app/main.mm Info.plist dev.entitlements
 	@mkdir -p $(DEV)/Contents/MacOS
@@ -68,6 +68,14 @@ leakcheck: dev
 	@pkill -x $(APP) 2>/dev/null; sleep 1; true
 	MallocStackLogging=1 leaks --atExit -- $(BUILD)/dev/usageq
 	-MallocStackLogging=1 leaks --atExit -- $(DEV)/Contents/MacOS/$(APP) --soak 100
+
+# Click test: opens the menu on demo data and clicks through the card (Settings, a refresh
+# interval, Done, hover), then checks that the power button and ⌘Q quit. Quits a running UsageQ.
+clicktest: dev
+	@pkill -x $(APP) 2>/dev/null; sleep 1; true
+	$(DEV)/Contents/MacOS/$(APP) --click-test
+	$(DEV)/Contents/MacOS/$(APP) --click-test quit && echo "pass  the power button quits"
+	$(DEV)/Contents/MacOS/$(APP) --click-test cmdq && echo "pass  ⌘Q quits"
 
 install: app
 	@pkill -x $(APP) 2>/dev/null; sleep 0.5; true

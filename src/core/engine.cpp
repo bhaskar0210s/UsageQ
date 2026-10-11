@@ -189,6 +189,18 @@ std::string snapshotJSON(const Snapshot& s, int64_t now) {
         }
         o += ",\n    \"top_model\": ";
         json::appendQuoted(o, c.topModel);
+        o += ",\n    \"top_models\": [";
+        bool firstModel = true;
+        for (const ModelUsage& m : c.topModels) {
+            if (m.model.empty()) continue;
+            o += firstModel ? "{\"model\": " : ", {\"model\": ";
+            firstModel = false;
+            json::appendQuoted(o, m.model);
+            o += ", \"usd\": ";
+            appendNumber(o, "%.2f", m.cost);
+            o += ", \"tokens\": " + std::to_string(m.tokens) + "}";
+        }
+        o += "]";
         o += ",\n    \"daily\": [";
         for (size_t i = 0; i < c.days.size(); ++i) {
             // Noon of each day keeps the date right across DST changes.
@@ -236,14 +248,15 @@ std::string snapshotText(const Snapshot& s, int64_t now) {
     }
     const CostSummary& c = s.cost;
     if (c.valid) {
-        auto row = [&](const char* label, const DayUsage& u) {
+        auto row = [&](const std::string& label, const DayUsage& u) {
             o += pad(label, 15) + pad(formatUSD(u.cost), 12) + formatTokens(double(u.tokens)) + " tokens\n";
         };
         row("Today", c.today);
         if (c.hasWindow) row("This week", c.window);
         if (c.hasWindow) row("Last week", c.previousWindow);
         row("Last 30 days", c.last30);
-        if (!c.topModel.empty()) o += pad("Top model", 15) + modelDisplayName(c.topModel) + "\n";
+        for (const ModelUsage& m : c.topModels)  // the 30 days' top two models
+            if (!m.model.empty()) row("  " + modelDisplayName(m.model), DayUsage{m.cost, m.tokens});
     }
     if (s.storage.valid) o += pad("Storage", 15) + formatBytes(s.storage.total) + "\n";
     return o;

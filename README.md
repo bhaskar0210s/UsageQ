@@ -23,7 +23,7 @@ A tiny, native macOS menu bar app for your Claude Code limits and spending.</p>
 - **Pace on the meter itself.** A thin marker shows the *even pace*: where you'd be with steady use. The gap between it and your usage is your reserve (green) or how far over pace you are (orange).
 - **Plain answers.** *12% in reserve*, *At this pace: lasts until reset*, or *100% by Wed 9:14 AM*. Resets are shown as clock times, *Resets 6:15 PM · in 2h 29m*.
 - **Spending.** Cost and tokens for Today, This week, Last week and the last 30 days, estimated at API prices from your local Claude Code logs.
-- **30 days at a glance.** Daily cost and token bars. Hover a day to see its totals and its top two models.
+- **30 days at a glance.** Daily cost and token bars, with your top two models over those 30 days. Hover a day to see that day's totals and top two models instead.
 - **The essentials, nothing else.** Your plan, the disk space Claude Code uses, Settings and Quit, all in one footer.
 - **In the menu bar.** Two tiny meters (session and weekly) and how much of your session you've used.
 
@@ -37,15 +37,15 @@ cd UsageQ
 make install
 ```
 
-`make install` builds the app and installs it as `/Applications/UsageQ.app`, which Finder shows as **Usage?**. It also links the `usageq` command into `~/.local/bin` and starts the app. On first launch the app adds itself to Login Items; turn that off under ⚙︎ → Launch at Login. `make uninstall` removes everything again.
+`make install` builds the app and installs it as `/Applications/UsageQ.app`, which Finder shows as **Usage?**. It also links the `usageq` command into `~/.local/bin` and starts the app. On first launch the app adds itself to Login Items; turn that off under ⚙︎ → Launch at login. `make uninstall` removes everything again.
 
 > **Why UsageQ?** The app is called **Usage?**, but a question mark can't go in repository names or terminal commands, so those use **UsageQ** / `usageq`.
 
 ## Using it
 
 - **Click the meters icon** to open the card. Every click refreshes the numbers.
-- **Hover the bars** to inspect any of the last 30 days. Move the pointer down and the day stays selected while you read it.
-- **⚙︎ Settings:** refresh every 1, 2, 5 or 15 minutes (default 5), Launch at Login, and Show Claude Code Data in Finder.
+- **Hover the bars** to inspect any of the last 30 days. Move the pointer down and the day stays selected while you read it. Move away and the box goes back to the whole 30 days.
+- **⚙︎ Settings** open right inside the card: refresh every 1, 2, 5 or 15 minutes (default 5), launch at login, and show Claude Code's data in Finder. **Done** (or ⚙︎ again) takes you back.
 - **⏻ Quit**, or press ⌘Q while the card is open.
 - When the numbers aren't fresh, for example offline, a short note at the top says so and shows how old they are.
 
@@ -53,7 +53,7 @@ make install
 
 ```sh
 usageq          # readable summary
-usageq --json   # limits, pace, spending (30 daily points with each day's top models), disk use
+usageq --json   # limits, pace, spending (30 daily points, top models per day and overall), disk use
 ```
 
 ```text
@@ -64,7 +64,8 @@ Today          $8.35       24.5M tokens
 This week      $134.12     363M tokens
 Last week      $249.40     668M tokens
 Last 30 days   $961.07     2.6B tokens
-Top model      Opus 5.5
+  Opus 5.5     $749.40     1.9B tokens
+  Sonnet 5.5   $104.50     348M tokens
 Storage        1.4 GB
 ```
 
@@ -77,7 +78,7 @@ Storage        1.4 GB
 
 ## Small on purpose
 
-About 10 MB of memory when idle, about 15 MB after the card has been opened. An empty AppKit menu bar app needs 8–14 MB on its own.
+About 10 MB of memory when idle and about 13 MB after the card has been opened. A lot of hovering can take it to about 18 MB; most of that extra is drawing memory that macOS reclaims when it needs it. An empty AppKit menu bar app needs 8–14 MB on its own.
 
 - The data layer (`src/core`) is plain C++20. The app (`src/app/main.mm`) is a thin AppKit shell, and the card is a single custom-drawn view using SF Pro, SF Symbols and system colors.
 - Keychain and network access run in short-lived helper processes, so no networking stack stays loaded.
@@ -85,6 +86,7 @@ About 10 MB of memory when idle, about 15 MB after the card has been opened. An 
 
 ```sh
 make leakcheck   # Apple's `leaks` on the CLI, then on the app through 100 refresh + open/close cycles
+make clicktest   # opens the real menu on demo data and clicks through it: Settings, Done, hover
 ```
 
 The app's own code shows zero leaks. `leaks` does list 26 KB from Apple's AppIntents framework, which an empty AppKit app reports identically.
@@ -95,7 +97,8 @@ The app's own code shows zero leaks. `leaks` does list 26 KB from Apple's AppInt
 make            # app + CLI in build/
 make dev        # debuggable build with test hooks:
                 #   --soak N                         refresh + menu cycles, printing memory
-                #   --render out.png --demo          draw the card with demo data (--dark, --day N, --stale)
+                #   --click-test [out.png|quit|cmdq] click through the open menu, checking each step
+                #   --render out.png --demo          draw the card with demo data (--dark, --day N, --stale, --settings)
                 #   --render-bar out.png [--dark]    draw the menu bar item
 ```
 
