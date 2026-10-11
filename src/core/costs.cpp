@@ -1,5 +1,7 @@
 #include "costs.hpp"
 
+#include <arm_neon.h>
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -210,6 +212,26 @@ bool members(const char*& p, const char* e, OnMember&& onMember) {
     }
 }
 
+// Whether [p, e) contains `"usage":`. NEON tests 16 start positions at once for the key's
+// first and last bytes; only the few positions where both match get a full compare.
+bool hasUsageKey(const char* p, const char* e) {
+    constexpr char kKey[] = "\"usage\":";
+    constexpr size_t kLen = sizeof(kKey) - 1;
+    const uint8x16_t quote = vdupq_n_u8('"'), colon = vdupq_n_u8(':');
+    for (; e - p >= ptrdiff_t(16 + kLen - 1); p += 16) {
+        const uint8x16_t hits = vandq_u8(vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t*>(p)), quote),
+                                         vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t*>(p) + kLen - 1), colon));
+        if (vmaxvq_u8(hits) == 0) continue;
+        uint8_t lanes[16];
+        vst1q_u8(lanes, hits);
+        for (int i = 0; i < 16; ++i)
+            if (lanes[i] && memcmp(p + i + 1, kKey + 1, kLen - 2) == 0) return true;
+    }
+    for (; e - p >= ptrdiff_t(kLen); ++p)
+        if (memcmp(p, kKey, kLen) == 0) return true;
+    return false;
+}
+
 bool parseLine(const char* begin, const char* e, Line& l) {
     const char* p = begin;
     return members(p, e, [&](std::string_view k, const char*& q) {
@@ -417,7 +439,7 @@ void CostScanner::grow() {
 
 void CostScanner::ingest(const char* begin, const char* end) {
     const size_t length = size_t(end - begin);
-    if (length < 64 || !memmem(begin, length, "\"usage\":", 8)) return;
+    if (length < 64 || !hasUsageKey(begin, end)) return;
     Line l;
     if (!parseLine(begin, end, l) || l.type != "assistant" || !l.hasUsage) return;
     if (l.input <= 0 && l.output <= 0 && l.cacheRead <= 0 && l.cacheWrite <= 0) return;

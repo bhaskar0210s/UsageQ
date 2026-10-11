@@ -295,6 +295,7 @@ enum : NSInteger {
     BOOL _settings;
     BOOL _launchAtLogin;
     NSRect _chartRect, _boxRect;
+    NSRect _dirty;  // what the current pass redraws
     NSInteger _hoverDay, _hoverTarget, _pressedTarget;
     std::vector<std::pair<NSRect, NSInteger>> _targets;
     NSTrackingArea* _tracking;
@@ -341,7 +342,24 @@ enum : NSInteger {
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
+    _dirty = dirtyRect;
     [self layout:YES];
+}
+
+// Whether this pass draws `r`. Hover and press redraw only the part of the card they change,
+// which keeps drawing (and the memory it churns through) small while the menu is open.
+- (BOOL)paints:(NSRect)r draw:(BOOL)draw {
+    return draw && NSIntersectsRect(r, _dirty);
+}
+
+- (NSRect)rectForTarget:(NSInteger)target {
+    for (const auto& [rect, t] : _targets)
+        if (t == target) return rect;
+    return NSZeroRect;
+}
+
+- (void)redrawTarget:(NSInteger)target {
+    if (target != kTargetNone) [self setNeedsDisplayInRect:NSInsetRect([self rectForTarget:target], -3, -3)];
 }
 
 - (void)separator:(CGFloat)y {
@@ -448,24 +466,25 @@ enum : NSInteger {
 - (void)spendingAt:(CGFloat)y draw:(BOOL)draw {
     const CGFloat left = kPad, right = kCardWidth - kPad, width = right - left;
     const uq::CostSummary& c = _snap.cost;
-    if (draw) DrawLeft(@"Spending", left, y, _name, width);
+    const BOOL paintTable = [self paints:NSMakeRect(0, y, kCardWidth, 24 + 16 + 18 + 20) draw:draw];
+    if (paintTable) DrawLeft(@"Spending", left, y, _name, width);
     y += 24;
     const CGFloat labelWidth = 50, column = (width - labelWidth) / 4;
     NSString* const heads[4] = {@"Today", @"This week", @"Last week", @"30 days"};
     const uq::DayUsage periods[4] = {c.today, c.window, c.previousWindow, c.last30};
     const bool known[4] = {true, c.hasWindow, c.hasWindow, true};
     auto columnRight = [&](int i) { return left + labelWidth + column * (i + 1); };
-    if (draw)
+    if (paintTable)
         for (int i = 0; i < 4; ++i) DrawRight(heads[i], columnRight(i), y, _small, column - 4);
     y += 16;
-    if (draw) {
+    if (paintTable) {
         DrawLeft(@"Cost", left, y, _secondary, labelWidth);
         for (int i = 0; i < 4; ++i)
             DrawRight(known[i] ? NS(uq::formatUSDShort(periods[i].cost)) : @"—", columnRight(i), y, _bodyStrong,
                       column - 4);
     }
     y += 18;
-    if (draw) {
+    if (paintTable) {
         DrawLeft(@"Tokens", left, y, _secondary, labelWidth);
         for (int i = 0; i < 4; ++i)
             DrawRight(known[i] ? NS(uq::formatTokens(double(periods[i].tokens))) : @"—", columnRight(i), y,
@@ -474,9 +493,9 @@ enum : NSInteger {
     y += 28;
 
     _chartRect = NSMakeRect(left, y, width, kChartHeight);
-    if (draw) [self drawBars];
+    if ([self paints:NSInsetRect(_chartRect, 0, -2) draw:draw]) [self drawBars];
     y += kChartHeight + 5;
-    if (draw) {
+    if ([self paints:NSMakeRect(0, y, kCardWidth, 16) draw:draw]) {
         DrawLeft(NS(uq::formatShortDate(c.firstDay)), left, y, _footnote, 60);
         const CGFloat legendWidth = 11 + TextWidth(@"Cost", _small) + 12 + 11 + TextWidth(@"Tokens", _small);
         const CGFloat x = [self legend:@"Cost" color:NSColor.systemBlueColor x:round(left + (width - legendWidth) / 2) y:y];
@@ -486,7 +505,7 @@ enum : NSInteger {
     y += 22;
 
     _boxRect = NSMakeRect(left, y, width, kBoxHeight);
-    if (!draw) return;
+    if (![self paints:_boxRect draw:draw]) return;
     const BOOL day = _hoverDay >= 0;
     NSString* title = !day                                            ? @"Last 30 days"
                       : _hoverDay == NSInteger(c.days.size()) - 1 ? @"Today"
@@ -527,6 +546,7 @@ enum : NSInteger {
     const CGFloat left = kPad, right = kCardWidth - kPad, width = right - left;
     const CGFloat inset = 12, refreshHeight = 76, rowHeight = 44;
     CGFloat y = top;
+    draw = [self paints:NSMakeRect(0, top - 4, kCardWidth, kSectionHeight + 4) draw:draw];
 
     NSDictionary* doneStyle = Recolored(_bodyStrong, NSColor.controlAccentColor);
     const CGFloat doneWidth = TextWidth(@"Done", doneStyle) + 16;
@@ -632,7 +652,7 @@ enum : NSInteger {
     CGFloat y = 14;
 
     if (NSString* notice = [self noticeText:now]) {
-        if (draw) {
+        if ([self paints:NSMakeRect(0, y, kCardWidth, 28) draw:draw]) {
             FillRounded(NSMakeRect(left, y, width, 28), 8, [NSColor.systemOrangeColor colorWithAlphaComponent:0.14]);
             DrawSymbol(_warning, NSMakePoint(left + 15, y + 14));
             DrawLeft(notice, left + 28, y + 6.5, _body, width - 36);
@@ -642,13 +662,15 @@ enum : NSInteger {
 
     // Limits: one meter each, session first.
     if (!_hasData || s.windows.empty()) {
-        if (draw) DrawLeft(_hasData ? @"Usage limits unavailable" : @"Checking your limits…", left, y, _secondary, width);
+        if ([self paints:NSMakeRect(0, y, kCardWidth, 24) draw:draw])
+            DrawLeft(_hasData ? @"Usage limits unavailable" : @"Checking your limits…", left, y, _secondary, width);
         y += 24;
     }
     for (size_t i = 0; i < s.windows.size(); ++i) {
         const LimitRow row = MakeLimitRow(s.windows[i], now);
         if (i > 0) y += 18;
-        if (draw) {
+        const BOOL paintRow = [self paints:NSMakeRect(0, y, kCardWidth, 82 + (row.outlook ? 17 : 0)) draw:draw];
+        if (paintRow) {
             const CGFloat usedWidth = TextWidth(@" used", _secondary);
             const CGFloat bigWidth = TextWidth(row.usedText, _big);
             DrawLeft(row.name, left, y + 5, _name, width - bigWidth - usedWidth - 10);
@@ -656,22 +678,22 @@ enum : NSInteger {
             DrawLeft(row.usedText, right - usedWidth - bigWidth, y, _big, bigWidth + 1);
         }
         y += 28;
-        if (draw) [self meter:NSMakeRect(left, y, width, 18) row:row];
+        if (paintRow) [self meter:NSMakeRect(left, y, width, 18) row:row];
         y += 20;
-        if (draw) {
+        if (paintRow) {
             DrawLeft(@"0", left, y, _footnote, 20);
             DrawCentered(@"50%", left + width * 0.5, y, _footnote);
             DrawCentered(@"75%", left + width * 0.75, y, _footnote);
             DrawRight(@"100%", right, y, _footnote, 40);
         }
         y += 17;
-        if (draw) {
+        if (paintRow) {
             const CGFloat used = DrawLeft(row.status, left, y, Recolored(_bodyStrong, row.statusColor), width / 2);
             DrawRight(row.resets, right, y, _secondary, width - used - 12);
         }
         y += 17;
         if (row.outlook) {
-            if (draw) {
+            if (paintRow) {
                 const CGFloat used = DrawLeft(@"At this pace: ", left, y, _secondary, width);
                 DrawLeft(row.outlook, left + used, y, Recolored(_body, row.outlookColor), width - used);
             }
@@ -680,7 +702,7 @@ enum : NSInteger {
     }
     if (!s.windows.empty()) {
         y += 8;
-        if (draw) {
+        if ([self paints:NSMakeRect(0, y, kCardWidth, 15) draw:draw]) {
             FillRounded(NSMakeRect(left, y + 2, 2, 11), 1, NSColor.labelColor);
             DrawLeft(@"Even pace: where you'd be with steady use", left + 8, y, _footnote, width - 8);
         }
@@ -690,7 +712,7 @@ enum : NSInteger {
     // Spending, or Settings in its place.
     if (_settings || s.cost.valid) {
         y += 12;
-        if (draw) [self separator:y];
+        if ([self paints:NSMakeRect(0, y, kCardWidth, 1) draw:draw]) [self separator:y];
         y += 13;
         if (_settings)
             [self settingsAt:y draw:draw];
@@ -701,13 +723,13 @@ enum : NSInteger {
 
     // Footer: name, plan and disk use, then Settings and Quit.
     y += 14;
-    if (draw) [self separator:y];
+    if ([self paints:NSMakeRect(0, y, kCardWidth, 1) draw:draw]) [self separator:y];
     y += 9;
     const NSRect quit = NSMakeRect(right - 26, y, 26, 26);
     const NSRect settings = NSMakeRect(right - 56, y, 26, 26);
     [self addTarget:kTargetSettings rect:settings];
     [self addTarget:kTargetQuit rect:quit];
-    if (draw) {
+    if ([self paints:NSMakeRect(0, y, kCardWidth, 26) draw:draw]) {
         NSMutableArray<NSString*>* facts = [NSMutableArray array];
         if (!s.account.plan.empty()) [facts addObject:NS(s.account.plan)];
         if (s.storage.valid) [facts addObject:[NS(uq::formatBytes(s.storage.total)) stringByAppendingString:@" on disk"]];
@@ -781,15 +803,19 @@ enum : NSInteger {
 - (void)setHoverDay:(NSInteger)day {
     if (day == _hoverDay) return;
     _hoverDay = day;
-    [self setNeedsDisplay:YES];
+    if (NSIsEmptyRect(_boxRect))
+        [self setNeedsDisplay:YES];
+    else  // the bars dim around the day, and the box below shows it
+        [self setNeedsDisplayInRect:NSUnionRect(NSInsetRect(_chartRect, -2, -2), _boxRect)];
 }
 
 - (void)mouseMoved:(NSEvent*)event {
     const NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];  // flipped: y grows down
     const NSInteger target = [self targetAt:p];
     if (target != _hoverTarget) {
+        [self redrawTarget:_hoverTarget];
+        [self redrawTarget:target];
         _hoverTarget = target;
-        [self setNeedsDisplay:YES];
     }
     if (_settings || !_snap.cost.valid) return;
     NSInteger day = -1;
@@ -804,9 +830,9 @@ enum : NSInteger {
 }
 
 - (void)mouseExited:(NSEvent*)event {
+    [self redrawTarget:_hoverTarget];
     _hoverTarget = kTargetNone;
     [self setHoverDay:-1];
-    [self setNeedsDisplay:YES];
 }
 
 // Buttons act on release, like standard controls. The menu is still tracking, so follow the
@@ -815,20 +841,20 @@ enum : NSInteger {
     const NSInteger target = [self targetAt:[self convertPoint:event.locationInWindow fromView:nil]];
     if (target == kTargetNone) return;
     _pressedTarget = target;
-    [self setNeedsDisplay:YES];
+    [self redrawTarget:target];
     [self displayIfNeeded];
     while (NSEvent* next = [self.window nextEventMatchingMask:NSEventMaskLeftMouseUp | NSEventMaskLeftMouseDragged]) {
         const NSInteger over = [self targetAt:[self convertPoint:next.locationInWindow fromView:nil]];
         if (next.type == NSEventTypeLeftMouseUp) {
             _pressedTarget = kTargetNone;
-            [self setNeedsDisplay:YES];
+            [self redrawTarget:target];
             if (over == target) [self perform:target];
             break;
         }
         const NSInteger pressed = over == target ? target : kTargetNone;
         if (pressed != _pressedTarget) {
             _pressedTarget = pressed;
-            [self setNeedsDisplay:YES];
+            [self redrawTarget:target];
             [self displayIfNeeded];
         }
     }
@@ -857,12 +883,6 @@ enum : NSInteger {
 - (NSRect)boxRect {
     return _boxRect;
 }
-
-- (NSRect)rectForTarget:(NSInteger)target {
-    for (const auto& [rect, t] : _targets)
-        if (t == target) return rect;
-    return NSZeroRect;
-}
 #endif
 
 @end
@@ -888,7 +908,7 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     uq::Engine* _engine;
     uq::Snapshot _snapshot;
     NSString* _glyphKey;
-    BOOL _refreshing, _pending, _pendingStorage;
+    BOOL _refreshing, _pending, _pendingForMenu;
     BOOL _menuOpen;
 #ifdef UQ_DEV
     BOOL _demo;  // click test: keep the demo numbers, never fetch
@@ -902,8 +922,9 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
         return;
     }
     _engine = new uq::Engine();
+    // Background QoS keeps routine refreshes on the efficiency cores; see -refreshForMenu:.
     _queue = dispatch_queue_create("usageq.refresh",
-                                   dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+                                   dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_BACKGROUND, 0));
 
     _statusItem = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
     _statusItem.button.imagePosition = NSImageLeading;
@@ -922,7 +943,7 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(NSNotification*) {
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                        [weakSelf refreshMeasuringStorage:NO];
+                        [weakSelf refreshForMenu:NO];
                     });
                 }];
 #ifdef UQ_DEV
@@ -942,7 +963,7 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
         });
     }
 #endif
-    [self refreshMeasuringStorage:NO];
+    [self refreshForMenu:NO];
 }
 
 // MARK: Menu
@@ -1004,13 +1025,17 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
 - (void)menuWillOpen:(NSMenu*)menu {
     _menuOpen = YES;
     // Every click checks for fresh numbers (the engine spaces out API calls) and measures disk use.
-    [self refreshMeasuringStorage:YES];
+    [self refreshForMenu:YES];
+    // Countdowns and pace move once a minute, so redraw just after each minute turns.
     __weak UQCardView* card = _card;
-    _clockTimer = [NSTimer timerWithTimeInterval:15
-                                         repeats:YES
-                                           block:^(NSTimer*) {
-                                               [card setNeedsDisplay:YES];
-                                           }];
+    const double now = NSDate.date.timeIntervalSince1970;
+    _clockTimer = [[NSTimer alloc] initWithFireDate:[NSDate dateWithTimeIntervalSince1970:floor(now / 60) * 60 + 60.05]
+                                           interval:60
+                                            repeats:YES
+                                              block:^(NSTimer*) {
+                                                  [card setNeedsDisplay:YES];
+                                              }];
+    _clockTimer.tolerance = 0.2;
     [NSRunLoop.currentRunLoop addTimer:_clockTimer forMode:NSRunLoopCommonModes];
 }
 
@@ -1072,20 +1097,26 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
 
 // MARK: Refresh
 
-- (void)refreshMeasuringStorage:(BOOL)storage {
+// Timer, wake and launch refreshes run at background QoS. Opening the menu also measures disk use
+// and runs at user-initiated QoS, because someone is looking at the card.
+- (void)refreshForMenu:(BOOL)forMenu {
 #ifdef UQ_DEV
     if (_demo) return;
 #endif
     if (_refreshing) {  // run once more when the current refresh lands
         _pending = YES;
-        _pendingStorage = _pendingStorage || storage;
+        _pendingForMenu = _pendingForMenu || forMenu;
+        if (forMenu)  // lifts the refresh already running to the priority of the one waiting on it
+            dispatch_async(_queue, dispatch_block_create_with_qos_class(DISPATCH_BLOCK_ENFORCE_QOS_CLASS,
+                                                                        QOS_CLASS_USER_INITIATED, 0, ^{
+                                                                        }));
         return;
     }
     _refreshing = YES;
     uq::Engine* engine = _engine;
     __weak UQAppDelegate* weakSelf = self;
-    dispatch_async(_queue, ^{
-        engine->refresh(uq::nowSeconds(), storage);
+    dispatch_block_t work = ^{
+        engine->refresh(uq::nowSeconds(), forMenu);
         const uq::Snapshot snapshot = engine->snapshot();
         malloc_zone_pressure_relief(nullptr, 0);  // hand scan buffers back to the system
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1094,12 +1125,15 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
             strongSelf->_refreshing = NO;
             [strongSelf apply:snapshot];
             if (strongSelf->_pending) {
-                const BOOL again = strongSelf->_pendingStorage;
-                strongSelf->_pending = strongSelf->_pendingStorage = NO;
-                [strongSelf refreshMeasuringStorage:again];
+                const BOOL again = strongSelf->_pendingForMenu;
+                strongSelf->_pending = strongSelf->_pendingForMenu = NO;
+                [strongSelf refreshForMenu:again];
             }
         });
-    });
+    };
+    dispatch_async(_queue, forMenu ? dispatch_block_create_with_qos_class(DISPATCH_BLOCK_ENFORCE_QOS_CLASS,
+                                                                          QOS_CLASS_USER_INITIATED, 0, work)
+                                   : work);
 }
 
 - (void)apply:(const uq::Snapshot&)snapshot {
@@ -1121,7 +1155,7 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:interval
                                                     repeats:YES
                                                       block:^(NSTimer*) {
-                                                          [weakSelf refreshMeasuringStorage:NO];
+                                                          [weakSelf refreshForMenu:NO];
                                                       }];
     _refreshTimer.tolerance = interval / 10;
 }
@@ -1138,8 +1172,8 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
 
 #ifdef UQ_DEV
 // Soak test for leaks and growth: each cycle runs a full refresh (log scan, storage, limits;
-// the engine still spaces out API calls), opens the menu, flips Settings on and off, closes it,
-// then lets the run loop idle briefly, like real use.
+// the engine still spaces out API calls), opens the menu, sweeps the pointer across the bars,
+// opens and closes Settings, closes the menu, then lets the run loop idle briefly, like real use.
 - (void)runSoak:(int)cycles {
     printf("soak start: %.1f MB\n", FootprintMB());
     [self soakStep:1 of:cycles];
@@ -1165,18 +1199,25 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
         [self apply:snapshot];
         __weak NSMenu* menu = _menu;
         __weak UQCardView* card = _card;
-        NSTimer* flip = [NSTimer timerWithTimeInterval:0.1
-                                               repeats:NO
+        __block NSInteger day = 0;
+        NSTimer* hover = [NSTimer timerWithTimeInterval:0.02  // sweep the pointer across the bars
+                                                repeats:YES
+                                                  block:^(NSTimer* t) {
+                                                      [card setHoverDay:day < 30 ? day++ : -1];
+                                                      if (day >= 30) [t invalidate];
+                                                  }];
+        NSTimer* flip = [NSTimer timerWithTimeInterval:0.7  // Settings on, then off again
+                                               repeats:YES
                                                  block:^(NSTimer*) {
                                                      [card toggleSettings];
                                                  }];
-        NSTimer* closer = [NSTimer timerWithTimeInterval:0.3
+        NSTimer* closer = [NSTimer timerWithTimeInterval:1.5
                                                  repeats:NO
                                                    block:^(NSTimer*) {
+                                                       [flip invalidate];
                                                        [menu cancelTracking];
                                                    }];
-        [NSRunLoop.currentRunLoop addTimer:flip forMode:NSRunLoopCommonModes];
-        [NSRunLoop.currentRunLoop addTimer:closer forMode:NSRunLoopCommonModes];
+        for (NSTimer* t in @[ hover, flip, closer ]) [NSRunLoop.currentRunLoop addTimer:t forMode:NSRunLoopCommonModes];
         [_menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, 0) inView:_statusItem.button];
     }
     if (i % 10 == 0) printf("cycle %3d: %.1f MB\n", i, FootprintMB());

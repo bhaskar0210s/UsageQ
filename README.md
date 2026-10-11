@@ -29,7 +29,7 @@ A tiny, native macOS menu bar app for your Claude Code limits and spending.</p>
 
 ## Install
 
-You need macOS 13 or later, the Xcode Command Line Tools (`xcode-select --install`), and to have signed in to Claude Code at least once.
+You need a Mac with Apple silicon running macOS 27 or later, the Xcode Command Line Tools (`xcode-select --install`), and to have signed in to Claude Code at least once.
 
 ```sh
 git clone https://github.com/bhaskar0210s/UsageQ.git
@@ -78,14 +78,16 @@ Storage        1.4 GB
 
 ## Small on purpose
 
-About 10 MB of memory when idle and about 13 MB after the card has been opened. A lot of hovering can take it to about 18 MB; most of that extra is drawing memory that macOS reclaims when it needs it. An empty AppKit menu bar app needs 8–14 MB on its own.
+About 10 MB of memory when idle and about 13 MB after the card has been opened. Hovering through the chart and opening Settings sets up more of macOS's drawing machinery, up to about 21 MB, where it stays; much of that is memory macOS reclaims when it needs it. An empty AppKit menu bar app needs 8–14 MB on its own.
 
 - The data layer (`src/core`) is plain C++20. The app (`src/app/main.mm`) is a thin AppKit shell, and the card is a single custom-drawn view using SF Pro, SF Symbols and system colors.
 - Keychain and network access run in short-lived helper processes, so no networking stack stays loaded.
-- The log scanner reads only newly appended lines after the first pass. Its buffers live on their own memory pages and are handed back to the system after every pass.
+- The log scanner reads only newly appended lines after the first pass. That first pass finds usage records with NEON vector instructions, so 30 days of logs (about 1 GB here) take about 0.2 s. Its buffers live on their own memory pages and are handed back to the system after every pass.
+- Routine refreshes run at background priority, so they stay on the efficiency cores. Opening the card refreshes at full speed.
+- While the card is open, only the part that changes is redrawn, and the clock-driven parts update once a minute.
 
 ```sh
-make leakcheck   # Apple's `leaks` on the CLI, then on the app through 100 refresh + open/close cycles
+make leakcheck   # Apple's `leaks` on the CLI, then on the app through 100 cycles of refresh, hover and Settings
 make clicktest   # opens the real menu on demo data and clicks through it: Settings, Done, hover
 ```
 
@@ -96,7 +98,7 @@ The app's own code shows zero leaks. `leaks` does list 26 KB from Apple's AppInt
 ```sh
 make            # app + CLI in build/
 make dev        # debuggable build with test hooks:
-                #   --soak N                         refresh + menu cycles, printing memory
+                #   --soak N                         refresh, hover and Settings cycles, printing memory
                 #   --click-test [out.png|quit|cmdq] click through the open menu, checking each step
                 #   --render out.png --demo          draw the card with demo data (--dark, --day N, --stale, --settings)
                 #   --render-bar out.png [--dark]    draw the menu bar item

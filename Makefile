@@ -4,14 +4,14 @@ BUILD    := build
 BUNDLE   := $(BUILD)/$(APP).app
 PREFIX   ?= /Applications
 BINDIR   ?= $(HOME)/.local/bin
-ARCH     ?= $(shell uname -m)
-MINOS    := 13.0
+MINOS    := 27.0
 
 CXX      := clang++
-FLAGS    := -arch $(ARCH) -mmacosx-version-min=$(MINOS) -DUQ_VERSION='"$(VERSION)"'
+# Apple silicon only.
+FLAGS    := -arch arm64 -mcpu=apple-m1 -mmacosx-version-min=$(MINOS) -DUQ_VERSION='"$(VERSION)"'
 CXXFLAGS := -std=c++20 -Os -Wall -Wextra -Wno-unused-parameter -fvisibility=hidden $(FLAGS)
 OBJCXX   := -fobjc-arc
-LDFLAGS  := -arch $(ARCH) -mmacosx-version-min=$(MINOS) -Wl,-dead_strip
+LDFLAGS  := -arch arm64 -mmacosx-version-min=$(MINOS) -Wl,-dead_strip
 
 CORE     := $(wildcard src/core/*.cpp)
 CORE_OBJ := $(CORE:src/%.cpp=$(BUILD)/obj/%.o)
@@ -61,7 +61,7 @@ dev: $(CORE_OBJ) $(BUILD)/usageq src/app/main.mm Info.plist dev.entitlements
 	cp $(BUILD)/usageq $(BUILD)/dev/usageq
 	codesign --force --sign - --entitlements dev.entitlements $(BUILD)/dev/usageq
 
-# Leak check: the CLI once, then the app through 100 refresh + menu cycles. Quits a running UsageQ.
+# Leak check: the CLI once, then the app through 100 cycles of refresh, hover and Settings. Quits a running UsageQ.
 # The app run always lists 417 objects (26 KB) from AppIntents' NSXPCConnection, which an empty
 # AppKit app reports too, so its exit status is ignored.
 leakcheck: dev
