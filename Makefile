@@ -1,0 +1,89 @@
+APP      := TokenTank
+VERSION  := 1.0.0
+BUILD    := build
+BUNDLE   := $(BUILD)/$(APP).app
+PREFIX   ?= /Applications
+BINDIR   ?= $(HOME)/.local/bin
+ARCH     ?= $(shell uname -m)
+MINOS    := 13.0
+
+CXX      := clang++
+FLAGS    := -arch $(ARCH) -mmacosx-version-min=$(MINOS) -DTT_VERSION='"$(VERSION)"'
+CXXFLAGS := -std=c++20 -Os -Wall -Wextra -Wno-unused-parameter -fvisibility=hidden $(FLAGS)
+OBJCXX   := -fobjc-arc
+LDFLAGS  := -arch $(ARCH) -mmacosx-version-min=$(MINOS) -Wl,-dead_strip
+
+CORE     := $(wildcard src/core/*.cpp)
+CORE_OBJ := $(CORE:src/%.cpp=$(BUILD)/obj/%.o)
+HEADERS  := $(wildcard src/core/*.hpp)
+
+.PHONY: all app cli dev leakcheck install uninstall run clean
+
+all: app cli
+
+app: $(BUNDLE)
+cli: $(BUILD)/tokentank
+
+$(BUILD)/obj/%.o: src/%.cpp $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/obj/app/main.o: src/app/main.mm $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(OBJCXX) -c $< -o $@
+
+$(BUILD)/tokentank: $(CORE_OBJ) $(BUILD)/obj/cli/main.o
+	$(CXX) $(LDFLAGS) $^ -o $@
+	strip -x $@
+
+$(BUNDLE): $(CORE_OBJ) $(BUILD)/obj/app/main.o $(BUILD)/tokentank Info.plist
+	@rm -rf $@
+	@mkdir -p $@/Contents/MacOS $@/Contents/Helpers
+	$(CXX) $(LDFLAGS) $(CORE_OBJ) $(BUILD)/obj/app/main.o -framework AppKit -framework ServiceManagement \
+		-o $@/Contents/MacOS/$(APP)
+	strip -x $@/Contents/MacOS/$(APP)
+	cp $(BUILD)/tokentank $@/Contents/Helpers/tokentank
+	sed 's/__VERSION__/$(VERSION)/g' Info.plist > $@/Contents/Info.plist
+	printf 'APPL????' > $@/Contents/PkgInfo
+	codesign --force --sign - $@/Contents/Helpers/tokentank
+	codesign --force --sign - $@
+
+# Dev build: debuggable, with test hooks (--soak N, --render out.png [--dark]).
+DEV := $(BUILD)/dev/$(APP).app
+dev: $(CORE_OBJ) $(BUILD)/tokentank src/app/main.mm Info.plist dev.entitlements
+	@mkdir -p $(DEV)/Contents/MacOS
+	$(CXX) $(CXXFLAGS) $(OBJCXX) -DTT_DEV -c src/app/main.mm -o $(BUILD)/dev/main.o
+	$(CXX) $(LDFLAGS) $(CORE_OBJ) $(BUILD)/dev/main.o -framework AppKit -framework ServiceManagement \
+		-o $(DEV)/Contents/MacOS/$(APP)
+	sed 's/__VERSION__/$(VERSION)-dev/g' Info.plist > $(DEV)/Contents/Info.plist
+	codesign --force --sign - --entitlements dev.entitlements $(DEV)
+	cp $(BUILD)/tokentank $(BUILD)/dev/tokentank
+	codesign --force --sign - --entitlements dev.entitlements $(BUILD)/dev/tokentank
+
+# Leak check: the CLI once, then the app through 100 refresh + menu cycles. Quits a running TokenTank.
+# The app run always lists 417 objects (26 KB) from AppIntents' NSXPCConnection, which an empty
+# AppKit app reports too, so its exit status is ignored.
+leakcheck: dev
+	@pkill -x $(APP) 2>/dev/null; sleep 1; true
+	MallocStackLogging=1 leaks --atExit -- $(BUILD)/dev/tokentank
+	-MallocStackLogging=1 leaks --atExit -- $(DEV)/Contents/MacOS/$(APP) --soak 100
+
+install: app
+	@pkill -x $(APP) 2>/dev/null; sleep 0.5; true
+	rm -rf "$(PREFIX)/$(APP).app"
+	ditto $(BUNDLE) "$(PREFIX)/$(APP).app"
+	@mkdir -p "$(BINDIR)"
+	ln -sf "$(PREFIX)/$(APP).app/Contents/Helpers/tokentank" "$(BINDIR)/tokentank"
+	open "$(PREFIX)/$(APP).app"
+	@echo "Installed $(PREFIX)/$(APP).app and $(BINDIR)/tokentank"
+
+uninstall:
+	@pkill -x $(APP) 2>/dev/null; true
+	rm -rf "$(PREFIX)/$(APP).app" "$(BINDIR)/tokentank"
+
+run: app
+	@pkill -x $(APP) 2>/dev/null; sleep 0.3; true
+	open $(BUNDLE)
+
+clean:
+	rm -rf $(BUILD)
