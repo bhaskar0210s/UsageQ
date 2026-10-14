@@ -25,11 +25,12 @@ all: app cli
 app: $(BUNDLE)
 cli: $(BUILD)/usageq
 
-$(BUILD)/obj/%.o: src/%.cpp $(HEADERS)
+# The Makefile is a prerequisite so a new VERSION or new flags rebuild everything.
+$(BUILD)/obj/%.o: src/%.cpp $(HEADERS) Makefile
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD)/obj/app/main.o: src/app/main.mm $(HEADERS)
+$(BUILD)/obj/app/main.o: src/app/main.mm $(HEADERS) Makefile
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(OBJCXX) -c $< -o $@
 
