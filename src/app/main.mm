@@ -321,7 +321,7 @@ enum : NSInteger {
     kTargetLogin,
     kTargetReveal,
     kTargetNotify,  // the Notify at field
-    kTargetInterval = 100,  // + minutes
+    kTargetInterval = 100,  // + minutes; + 0 is Off
 };
 
 @implementation UQCardView {
@@ -655,7 +655,7 @@ enum : NSInteger {
     // Refresh interval: a segmented control.
     if (draw) DrawLeft(@"Refresh every", left + inset, y + 10, _label, width - 2 * inset);
     const NSRect track = NSMakeRect(left + inset, y + 32, width - 2 * inset, 28);
-    const NSInteger choices[4] = {1, 2, 5, 15};
+    const NSInteger choices[4] = {5, 15, 60, 0};  // minutes; 0 is Off
     const NSInteger current = [self.actions cardRefreshMinutes];
     if (draw) FillRounded(track, 7, Tint(0.06));
     const CGFloat segment = track.size.width / 4;
@@ -677,7 +677,9 @@ enum : NSInteger {
         } else {
             [self buttonBackground:thumb target:kTargetInterval + choices[i] radius:5];
         }
-        NSString* text = [NSString stringWithFormat:@"%ld min", long(choices[i])];
+        NSString* text = choices[i] == 0    ? @"Off"
+                         : choices[i] == 60 ? @"1 hour"
+                                            : [NSString stringWithFormat:@"%ld min", long(choices[i])];
         DrawCentered(text, NSMidX(cell), cell.origin.y + 6.5, selected ? _bodyStrong : _secondary);
     }
     y += refreshHeight;
@@ -939,7 +941,7 @@ enum : NSInteger {
             _launchAtLogin = [self.actions cardLaunchesAtLogin];
             break;
         default:
-            if (target > kTargetInterval) [self.actions cardSetRefreshMinutes:target - kTargetInterval];
+            if (target >= kTargetInterval) [self.actions cardSetRefreshMinutes:target - kTargetInterval];
             break;
     }
     [self.actions cardNeedsResize];
@@ -1126,11 +1128,16 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
                      queue:NSOperationQueue.mainQueue
                 usingBlock:^(NSNotification*) {
                     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                        [weakSelf refreshForMenu:NO];
+                        UQAppDelegate* strongSelf = weakSelf;
+                        if (strongSelf && [strongSelf refreshMinutes] > 0) [strongSelf refreshForMenu:NO];
                     });
                 }];
 #ifdef UQ_DEV
     NSArray<NSString*>* args = NSProcessInfo.processInfo.arguments;
+    if ([args containsObject:@"--demo"]) {  // demo numbers only: nothing is fetched
+        _demo = YES;
+        [self apply:DemoSnapshot(uq::nowSeconds())];
+    }
     const NSUInteger soak = [args indexOfObject:@"--soak"];
     if (soak != NSNotFound && soak + 1 < args.count)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
@@ -1244,7 +1251,7 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
 }
 
 - (void)cardSetRefreshMinutes:(NSInteger)minutes {
-    [NSUserDefaults.standardUserDefaults setInteger:minutes forKey:kRefreshMinutesKey];
+    [NSUserDefaults.standardUserDefaults setInteger:minutes > 0 ? minutes : -1 forKey:kRefreshMinutesKey];
     [self scheduleRefreshTimer];
 }
 
@@ -1425,13 +1432,18 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     [self checkAlerts];
 }
 
+// 5, 15 or 60 minutes, or 0 when automatic refresh is off (stored as -1). Choices from older
+// versions (1 and 2 minutes) become 5.
 - (NSInteger)refreshMinutes {
-    const NSInteger minutes = [NSUserDefaults.standardUserDefaults integerForKey:kRefreshMinutesKey];
-    return minutes > 0 ? minutes : 5;
+    const NSInteger stored = [NSUserDefaults.standardUserDefaults integerForKey:kRefreshMinutesKey];
+    if (stored < 0) return 0;
+    return stored == 15 || stored == 60 ? stored : 5;
 }
 
 - (void)scheduleRefreshTimer {
     [_refreshTimer invalidate];
+    _refreshTimer = nil;
+    if ([self refreshMinutes] == 0) return;  // Off: numbers update when the menu opens
     const NSTimeInterval interval = [self refreshMinutes] * 60.0;
     __weak UQAppDelegate* weakSelf = self;
     _refreshTimer = [NSTimer scheduledTimerWithTimeInterval:interval
@@ -1472,12 +1484,13 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     }
     @autoreleasepool {
         uq::Engine* engine = _engine;
-        __block uq::Snapshot snapshot;
-        dispatch_sync(_queue, ^{
-            engine->refresh(uq::nowSeconds(), true);
-            snapshot = engine->snapshot();
-            malloc_zone_pressure_relief(nullptr, 0);
-        });
+        __block uq::Snapshot snapshot = _demo ? DemoSnapshot(uq::nowSeconds()) : uq::Snapshot();
+        if (!_demo)
+            dispatch_sync(_queue, ^{
+                engine->refresh(uq::nowSeconds(), true);
+                snapshot = engine->snapshot();
+                malloc_zone_pressure_relief(nullptr, 0);
+            });
         [self apply:snapshot];
         __weak NSMenu* menu = _menu;
         __weak UQCardView* card = _card;
@@ -1643,8 +1656,10 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
         [steps addObject:^{ check([defaults stringForKey:kNotifyAtKey].length == 0 && menuOpen(), @"clearing the field turns it off"); }];
         [steps addObject:^{ click(kTargetNotify); }];
         [steps addObject:^{ type(@"60"); }];  // no Return: the next click saves it
-        [steps addObject:^{ click(kTargetInterval + 15); }];
-        [steps addObject:^{ check([weakSelf refreshMinutes] == 15 && menuOpen(), @"a refresh interval can be picked"); }];
+        [steps addObject:^{ click(kTargetInterval + 60); }];
+        [steps addObject:^{ check([weakSelf refreshMinutes] == 60 && menuOpen(), @"a refresh interval can be picked"); }];
+        [steps addObject:^{ click(kTargetInterval); }];
+        [steps addObject:^{ check([weakSelf refreshMinutes] == 0 && menuOpen(), @"automatic refresh can be turned off"); }];
         [steps addObject:^{ check([[defaults stringForKey:kNotifyAtKey] isEqualToString:@"60"], @"clicking elsewhere saves what was typed"); }];
         [steps addObject:^{
             if (png) {

@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="128" alt="Usage? app icon"></p>
+
 <h1 align="center">Usage?</h1>
 
 <p align="center"><b>How much Claude have I used?</b><br>
@@ -46,7 +48,7 @@ make install
 
 - **Click the meters icon** to open the card. Every click refreshes the numbers.
 - **Hover the bars** to inspect any of the last 30 days. Move the pointer down and the day stays selected while you read it. Move away and the box goes back to the whole 30 days.
-- **⚙︎ Settings** open right inside the card: refresh every 1, 2, 5 or 15 minutes (default 5), Notify at, launch at login, and show Claude Code's data in Finder. **Done** (or ⚙︎ again) takes you back.
+- **⚙︎ Settings** open right inside the card: refresh every 5 minutes (the default), 15 minutes or 1 hour, or Off; Notify at; launch at login; and show Claude Code's data in Finder. **Done** (or ⚙︎ again) takes you back. With refresh Off, the numbers update only when you open the menu (and once at launch), and so do the Notify at checks.
 - **Notify at** takes whole percentages separated by commas, like `50,75` or `50,75,90`; leave it empty for no notifications. Each limit (the session and each weekly limit) notifies once per value per reset period, checked whenever the numbers refresh. macOS asks for permission the first time. To keep the notifications on screen until you close them, choose **Persistent** in System Settings › Notifications › Usage?.
 - **⏻ Quit**, or press ⌘Q while the card is open.
 - When the numbers aren't fresh, for example offline, a short note at the top says so and shows how old they are.

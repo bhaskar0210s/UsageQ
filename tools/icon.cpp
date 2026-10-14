@@ -1,34 +1,59 @@
-// Renders the app icon into an .iconset directory (see `make icon`): two of the card's
-// meters, session above weekly, each with its even-pace tick. Flat colours keep it tiny.
+// Renders the app icon into an .iconset directory (see `make icon`): a question mark whose curve
+// is a usage meter, partly filled, on a softly lit tile.
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <ImageIO/ImageIO.h>
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 
 namespace {
 
-void fill(CGContextRef g, CGPathRef path, int rgb) {
-    CGColorRef c = CGColorCreateSRGB(((rgb >> 16) & 255) / 255.0, ((rgb >> 8) & 255) / 255.0, (rgb & 255) / 255.0, 1);
+struct RGB {
+    double r, g, b;
+};
+
+constexpr RGB hex(int rgb) {
+    return {((rgb >> 16) & 255) / 255.0, ((rgb >> 8) & 255) / 255.0, (rgb & 255) / 255.0};
+}
+
+// Night blue tile; the meter's filled part runs from cyan to the system blue.
+constexpr RGB kTileTop = hex(0x2B3A57), kTileBottom = hex(0x111827);
+constexpr RGB kUsedStart = hex(0x64D2FF), kUsedEnd = hex(0x0A84FF);
+constexpr RGB kWhite = hex(0xFFFFFF);
+
+CGColorRef color(RGB c, double alpha = 1) {
+    return CGColorCreateSRGB(c.r, c.g, c.b, alpha);
+}
+
+void fillPath(CGContextRef g, CGPathRef path, RGB c, double alpha = 1) {
+    CGColorRef fill = color(c, alpha);
     CGContextAddPath(g, path);
-    CGContextSetFillColorWithColor(g, c);
+    CGContextSetFillColorWithColor(g, fill);
     CGContextFillPath(g);
-    CGColorRelease(c);
+    CGColorRelease(fill);
 }
 
-void rounded(CGContextRef g, CGRect r, double radius, int rgb) {
-    CGPathRef path = CGPathCreateWithRoundedRect(r, radius, radius, nullptr);
-    fill(g, path, rgb);
-    CGPathRelease(path);
+void gradientIn(CGContextRef g, CGColorSpaceRef space, CGPathRef clip, RGB a, RGB b, CGPoint from, CGPoint to,
+                double alphaA = 1, double alphaB = 1) {
+    CGContextSaveGState(g);
+    CGContextAddPath(g, clip);
+    CGContextClip(g);
+    const CGFloat stops[] = {CGFloat(a.r), CGFloat(a.g), CGFloat(a.b), CGFloat(alphaA),
+                             CGFloat(b.r), CGFloat(b.g), CGFloat(b.b), CGFloat(alphaB)};
+    CGGradientRef gradient = CGGradientCreateWithColorComponents(space, stops, nullptr, 2);
+    CGContextDrawLinearGradient(g, gradient, from, to, kCGGradientDrawsBeforeStartLocation | kCGGradientDrawsAfterEndLocation);
+    CGGradientRelease(gradient);
+    CGContextRestoreGState(g);
 }
 
-// A meter: grey track, blue used part, dark even-pace tick standing above and below it.
-void meter(CGContextRef g, double y, double used, double pace) {
-    const double left = 222, width = 580, height = 132;
-    rounded(g, CGRectMake(left, y, width, height), height / 2, 0xDCDFE5);
-    rounded(g, CGRectMake(left, y, width * used, height), height / 2, 0x0A84FF);
-    rounded(g, CGRectMake(left + width * pace - 9, y - 26, 18, height + 52), 9, 0x1C1C1E);
+CGPathRef stroked(CGPathRef path, double width) {
+    return CGPathCreateCopyByStrokingPath(path, nullptr, width, kCGLineCapRound, kCGLineJoinRound, 0);
+}
+
+double rad(double degrees) {
+    return degrees * M_PI / 180;
 }
 
 void render(int pixels, const std::string& file) {
@@ -36,12 +61,39 @@ void render(int pixels, const std::string& file) {
     CGContextRef g = CGBitmapContextCreate(nullptr, pixels, pixels, 8, 0, space, kCGImageAlphaPremultipliedLast);
     CGContextScaleCTM(g, pixels / 1024.0, pixels / 1024.0);
 
-    // macOS icon grid: an 824pt rounded square centred in a 1024pt canvas, with a fine edge so it
-    // holds its shape on white.
-    rounded(g, CGRectMake(100, 100, 824, 824), 185, 0xD5D8DE);
-    rounded(g, CGRectMake(104, 104, 816, 816), 181, 0xF6F7F9);
-    meter(g, 548, 0.64, 0.50);  // session
-    meter(g, 344, 0.38, 0.56);  // weekly
+    // macOS icon grid: an 824pt rounded square centred in a 1024pt canvas, lit from above, with a
+    // faint glass rim along its upper edge.
+    CGPathRef tile = CGPathCreateWithRoundedRect(CGRectMake(100, 100, 824, 824), 185, 185, nullptr);
+    gradientIn(g, space, tile, kTileTop, kTileBottom, CGPointMake(0, 924), CGPointMake(0, 100));
+    CGPathRef rimPath = CGPathCreateWithRoundedRect(CGRectMake(103, 103, 818, 818), 182, 182, nullptr);
+    CGPathRef rim = CGPathCreateCopyByStrokingPath(rimPath, nullptr, 6, kCGLineCapRound, kCGLineJoinRound, 0);
+    gradientIn(g, space, rim, kWhite, kWhite, CGPointMake(0, 924), CGPointMake(0, 520), 0.22, 0);
+
+    // The question mark: a hook (the meter), a short stem and a dot. y grows upwards here.
+    const double cx = 512, cy = 598, r = 150, width = 100;
+    const double usedTo = 8;  // the filled part runs from the hook's start over the top to here
+    CGMutablePathRef whole = CGPathCreateMutable();
+    CGPathAddArc(whole, nullptr, cx, cy, r, rad(198), rad(-38), true);
+    const CGPoint end = CGPathGetCurrentPoint(whole);
+    CGPathAddQuadCurveToPoint(whole, nullptr, cx + 6, end.y - 40, cx, 430);
+    CGPathAddLineToPoint(whole, nullptr, cx, 410);
+    CGPathRef track = stroked(whole, width);
+    CGContextSaveGState(g);  // a soft shadow lifts the whole mark off the tile
+    CGColorRef shadow = CGColorCreateSRGB(0, 0, 0, 0.35);
+    CGContextSetShadowWithColor(g, CGSizeMake(0, -10), 22, shadow);
+    CGColorRelease(shadow);
+    CGContextBeginTransparencyLayer(g, nullptr);
+    fillPath(g, track, kWhite, 0.16);
+
+    CGMutablePathRef used = CGPathCreateMutable();
+    CGPathAddArc(used, nullptr, cx, cy, r, rad(198), rad(usedTo), true);
+    CGPathRef usedStroke = stroked(used, width);
+    gradientIn(g, space, usedStroke, kUsedStart, kUsedEnd, CGPointMake(cx - r, cy - r / 2), CGPointMake(cx + r, cy + r));
+
+    CGPathRef dot = CGPathCreateWithEllipseInRect(CGRectMake(cx - 56, 246, 112, 112), nullptr);
+    fillPath(g, dot, kWhite);
+    CGContextEndTransparencyLayer(g);
+    CGContextRestoreGState(g);
 
     CGImageRef image = CGBitmapContextCreateImage(g);
     CFStringRef path = CFStringCreateWithCString(nullptr, file.c_str(), kCFStringEncodingUTF8);
@@ -54,6 +106,14 @@ void render(int pixels, const std::string& file) {
     CFRelease(url);
     CFRelease(path);
     CGImageRelease(image);
+    CGPathRelease(dot);
+    CGPathRelease(usedStroke);
+    CGPathRelease(used);
+    CGPathRelease(track);
+    CGPathRelease(whole);
+    CGPathRelease(rim);
+    CGPathRelease(rimPath);
+    CGPathRelease(tile);
     CGContextRelease(g);
     CGColorSpaceRelease(space);
 }

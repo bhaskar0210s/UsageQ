@@ -1,5 +1,5 @@
 APP      := UsageQ
-VERSION  := 1.1.0
+VERSION  := 1.2.0
 BUILD    := build
 BUNDLE   := $(BUILD)/$(APP).app
 ICON     := resources/$(APP).icns
@@ -73,13 +73,14 @@ dev: $(CORE_OBJ) $(BUILD)/usageq src/app/main.mm Info.plist dev.entitlements $(I
 	cp $(BUILD)/usageq $(BUILD)/dev/usageq
 	codesign --force --sign - --entitlements dev.entitlements $(BUILD)/dev/usageq
 
-# Leak check: the CLI once, then the app through 100 cycles of refresh, hover and Settings. Quits a running UsageQ.
+# Leak check: the CLI once, then the app through 100 cycles of hover and Settings on demo numbers
+# (no API calls, so the usage endpoint's rate limit is never hit). Quits a running UsageQ.
 # The app run always lists 417 objects (26 KB) from AppIntents' NSXPCConnection, which an empty
 # AppKit app reports too, so its exit status is ignored.
 leakcheck: dev
 	@pkill -x $(APP) 2>/dev/null; sleep 1; true
 	MallocStackLogging=1 leaks --atExit -- $(BUILD)/dev/usageq
-	-MallocStackLogging=1 leaks --atExit -- $(DEV)/Contents/MacOS/$(APP) --soak 100
+	-MallocStackLogging=1 leaks --atExit -- $(DEV)/Contents/MacOS/$(APP) --soak 100 --demo
 
 # Click test: opens the menu on demo data and uses the card (Settings, typing in Notify at, a refresh
 # interval, Done, hover), then checks that the power button and ⌘Q quit. Quits a running UsageQ.
