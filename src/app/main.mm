@@ -2,6 +2,7 @@
 // The data layer is plain C++ (src/core); this file is the thin AppKit shell around it.
 #import <AppKit/AppKit.h>
 #import <ServiceManagement/ServiceManagement.h>
+#import <UserNotifications/UserNotifications.h>
 
 #include <malloc/malloc.h>
 
@@ -10,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "../core/alerts.hpp"
 #include "../core/engine.hpp"
 #include "../core/format.hpp"
 #include "../core/util.hpp"
@@ -33,6 +35,8 @@ static const CGFloat kBoxHeight = 10 + 17 + 2 * 16 + 8;
 static const CGFloat kSectionHeight = 24 + 16 + 18 + 28 + kChartHeight + 5 + 22 + kBoxHeight;
 static NSString* const kRefreshMinutesKey = @"refreshMinutes";
 static NSString* const kLoginConfiguredKey = @"loginItemConfigured";
+static NSString* const kNotifyAtKey = @"notifyAt";        // "50,75"
+static NSString* const kNotifyStateKey = @"notifyState";  // thresholds already announced, see AlertTracker
 
 // MARK: - Drawing helpers
 
@@ -261,9 +265,38 @@ static LimitRow MakeLimitRow(const uq::LimitWindow& raw, int64_t now) {
 - (void)cardRevealData;
 - (void)cardQuit;
 - (void)cardNeedsResize;
+- (NSString*)cardNotifyAt;  // "50,75", or empty when off
+- (void)cardSetNotifyAt:(NSString*)text;
+- (BOOL)cardNotificationsBlocked;  // turned off for Usage? in System Settings
 @end
 
-@interface UQCardView : NSView
+// Lets only digits and commas into the Notify at field, so a paste like "50, 75%" becomes "50,75".
+@interface UQPercentListFormatter : NSFormatter
+@end
+
+@implementation UQPercentListFormatter
+- (NSString*)stringForObjectValue:(id)value {
+    return [value isKindOfClass:NSString.class] ? value : @"";
+}
+
+- (BOOL)getObjectValue:(id*)value forString:(NSString*)string errorDescription:(NSString**)error {
+    *value = string;
+    return YES;
+}
+
+- (BOOL)isPartialStringValid:(NSString*)partial newEditingString:(NSString**)replacement errorDescription:(NSString**)error {
+    NSMutableString* kept = [NSMutableString stringWithCapacity:partial.length];
+    for (NSUInteger i = 0; i < partial.length && kept.length < 60; ++i) {
+        const unichar c = [partial characterAtIndex:i];
+        if (c == ',' || (c >= '0' && c <= '9')) [kept appendFormat:@"%C", c];
+    }
+    if ([kept isEqualToString:partial]) return YES;
+    *replacement = kept;
+    return NO;
+}
+@end
+
+@interface UQCardView : NSView <NSTextFieldDelegate>
 @property(nonatomic, weak) id<UQCardActions> actions;
 - (void)showSnapshot:(const uq::Snapshot&)snapshot;
 - (CGFloat)preferredHeight;
@@ -272,6 +305,7 @@ static LimitRow MakeLimitRow(const uq::LimitWindow& raw, int64_t now) {
 - (void)reset;
 #ifdef UQ_DEV
 @property(nonatomic, readonly) BOOL showingSettings;
+@property(nonatomic, readonly) BOOL editingNotify;
 @property(nonatomic, readonly) NSInteger hoverDay;
 @property(nonatomic, readonly) NSRect chartRect, boxRect;
 - (NSRect)rectForTarget:(NSInteger)target;
@@ -286,6 +320,7 @@ enum : NSInteger {
     kTargetDone,      // back from Settings
     kTargetLogin,
     kTargetReveal,
+    kTargetNotify,  // the Notify at field
     kTargetInterval = 100,  // + minutes
 };
 
@@ -294,8 +329,10 @@ enum : NSInteger {
     BOOL _hasData;
     BOOL _settings;
     BOOL _launchAtLogin;
+    BOOL _editing;  // typing in Notify at
+    NSTextField* _field;
+    NSRect _fieldRect;
     NSRect _chartRect, _boxRect;
-    NSRect _dirty;  // what the current pass redraws
     NSInteger _hoverDay, _hoverTarget, _pressedTarget;
     std::vector<std::pair<NSRect, NSInteger>> _targets;
     NSTrackingArea* _tracking;
@@ -305,6 +342,8 @@ enum : NSInteger {
 
 - (instancetype)initWithFrame:(NSRect)frame {
     if ((self = [super initWithFrame:frame])) {
+        self.wantsLayer = YES;
+        self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawOnSetNeedsDisplay;
         _hoverDay = -1;
         NSFont* rounded = [NSFont monospacedDigitSystemFontOfSize:20 weight:NSFontWeightSemibold];
         NSFontDescriptor* roundedDesc = [rounded.fontDescriptor fontDescriptorWithDesign:NSFontDescriptorSystemDesignRounded];
@@ -341,15 +380,58 @@ enum : NSInteger {
     return [self layout:NO];
 }
 
+// The card is drawn on the CPU into a plain image in the window's colour space, which Core
+// Animation shows as it is. Drawing through drawRect: instead lets Core Animation rasterise on the
+// GPU from inside the app, which loads Metal and keeps megabytes of GPU buffers for the app's life.
+- (BOOL)wantsUpdateLayer {
+    return YES;
+}
+
+- (void)updateLayer {
+    const CGFloat scale = self.window.backingScaleFactor ?: 2;
+    const NSSize size = self.bounds.size;
+    CGColorSpaceRef space = self.window.colorSpace.CGColorSpace;
+    CGColorSpaceRef srgb = space ? nullptr : CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef context = CGBitmapContextCreate(
+        nullptr, size_t(ceil(size.width * scale)), size_t(ceil(size.height * scale)), 8, 0, space ?: srgb,
+        uint32_t(kCGImageAlphaPremultipliedFirst) | uint32_t(kCGBitmapByteOrder32Host));
+    if (srgb) CGColorSpaceRelease(srgb);
+    if (!context) return;
+    CGContextScaleCTM(context, scale, scale);
+    [self renderInto:context];
+    CGImageRef image = CGBitmapContextCreateImage(context);
+    CGContextRelease(context);
+    self.layer.contentsScale = scale;
+    self.layer.contents = (__bridge id)image;  // transparent: the menu's material shows through
+    CGImageRelease(image);
+}
+
+// Draws the whole card into `context`, whose origin is the card's bottom-left corner.
+- (void)renderInto:(CGContextRef)context {
+    CGContextSaveGState(context);
+    CGContextTranslateCTM(context, 0, self.bounds.size.height);  // y-down, like the view
+    CGContextScaleCTM(context, 1, -1);
+    CGContextSetShouldSmoothFonts(context, false);  // as AppKit draws text on a transparent layer
+    [NSGraphicsContext saveGraphicsState];
+    NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithCGContext:context flipped:YES];
+    [self.effectiveAppearance performAsCurrentDrawingAppearance:^{
+        [self layout:YES];
+    }];
+    [NSGraphicsContext restoreGraphicsState];
+    CGContextRestoreGState(context);
+}
+
+// Only for snapshots of the view (cacheDisplayInRect:); the menu shows the image from updateLayer.
 - (void)drawRect:(NSRect)dirtyRect {
-    _dirty = dirtyRect;
     [self layout:YES];
 }
 
-// Whether this pass draws `r`. Hover and press redraw only the part of the card they change,
-// which keeps drawing (and the memory it churns through) small while the menu is open.
-- (BOOL)paints:(NSRect)r draw:(BOOL)draw {
-    return draw && NSIntersectsRect(r, _dirty);
+- (void)viewDidChangeEffectiveAppearance {
+    self.needsDisplay = YES;
+}
+
+- (void)viewDidChangeBackingProperties {
+    self.needsDisplay = YES;
 }
 
 - (NSRect)rectForTarget:(NSInteger)target {
@@ -359,7 +441,7 @@ enum : NSInteger {
 }
 
 - (void)redrawTarget:(NSInteger)target {
-    if (target != kTargetNone) [self setNeedsDisplayInRect:NSInsetRect([self rectForTarget:target], -3, -3)];
+    if (target != kTargetNone) self.needsDisplay = YES;
 }
 
 - (void)separator:(CGFloat)y {
@@ -466,25 +548,24 @@ enum : NSInteger {
 - (void)spendingAt:(CGFloat)y draw:(BOOL)draw {
     const CGFloat left = kPad, right = kCardWidth - kPad, width = right - left;
     const uq::CostSummary& c = _snap.cost;
-    const BOOL paintTable = [self paints:NSMakeRect(0, y, kCardWidth, 24 + 16 + 18 + 20) draw:draw];
-    if (paintTable) DrawLeft(@"Spending", left, y, _name, width);
+    if (draw) DrawLeft(@"Spending", left, y, _name, width);
     y += 24;
     const CGFloat labelWidth = 50, column = (width - labelWidth) / 4;
     NSString* const heads[4] = {@"Today", @"This week", @"Last week", @"30 days"};
     const uq::DayUsage periods[4] = {c.today, c.window, c.previousWindow, c.last30};
     const bool known[4] = {true, c.hasWindow, c.hasWindow, true};
     auto columnRight = [&](int i) { return left + labelWidth + column * (i + 1); };
-    if (paintTable)
+    if (draw)
         for (int i = 0; i < 4; ++i) DrawRight(heads[i], columnRight(i), y, _small, column - 4);
     y += 16;
-    if (paintTable) {
+    if (draw) {
         DrawLeft(@"Cost", left, y, _secondary, labelWidth);
         for (int i = 0; i < 4; ++i)
             DrawRight(known[i] ? NS(uq::formatUSDShort(periods[i].cost)) : @"—", columnRight(i), y, _bodyStrong,
                       column - 4);
     }
     y += 18;
-    if (paintTable) {
+    if (draw) {
         DrawLeft(@"Tokens", left, y, _secondary, labelWidth);
         for (int i = 0; i < 4; ++i)
             DrawRight(known[i] ? NS(uq::formatTokens(double(periods[i].tokens))) : @"—", columnRight(i), y,
@@ -493,9 +574,9 @@ enum : NSInteger {
     y += 28;
 
     _chartRect = NSMakeRect(left, y, width, kChartHeight);
-    if ([self paints:NSInsetRect(_chartRect, 0, -2) draw:draw]) [self drawBars];
+    if (draw) [self drawBars];
     y += kChartHeight + 5;
-    if ([self paints:NSMakeRect(0, y, kCardWidth, 16) draw:draw]) {
+    if (draw) {
         DrawLeft(NS(uq::formatShortDate(c.firstDay)), left, y, _footnote, 60);
         const CGFloat legendWidth = 11 + TextWidth(@"Cost", _small) + 12 + 11 + TextWidth(@"Tokens", _small);
         const CGFloat x = [self legend:@"Cost" color:NSColor.systemBlueColor x:round(left + (width - legendWidth) / 2) y:y];
@@ -505,7 +586,7 @@ enum : NSInteger {
     y += 22;
 
     _boxRect = NSMakeRect(left, y, width, kBoxHeight);
-    if (![self paints:_boxRect draw:draw]) return;
+    if (!draw) return;
     const BOOL day = _hoverDay >= 0;
     NSString* title = !day                                            ? @"Last 30 days"
                       : _hoverDay == NSInteger(c.days.size()) - 1 ? @"Today"
@@ -540,13 +621,12 @@ enum : NSInteger {
     [NSGraphicsContext restoreGraphicsState];
 }
 
-// Settings, in place of Spending and grouped like System Settings: refresh interval, launch at
-// login, and Claude Code's data folder.
+// Settings, in place of Spending and grouped like System Settings: refresh interval, notification
+// thresholds, launch at login, and Claude Code's data folder.
 - (void)settingsAt:(CGFloat)top draw:(BOOL)draw {
     const CGFloat left = kPad, right = kCardWidth - kPad, width = right - left;
-    const CGFloat inset = 12, refreshHeight = 76, rowHeight = 44;
+    const CGFloat inset = 12, refreshHeight = 70, rowHeight = 40;
     CGFloat y = top;
-    draw = [self paints:NSMakeRect(0, top - 4, kCardWidth, kSectionHeight + 4) draw:draw];
 
     NSDictionary* doneStyle = Recolored(_bodyStrong, NSColor.controlAccentColor);
     const CGFloat doneWidth = TextWidth(@"Done", doneStyle) + 16;
@@ -559,7 +639,7 @@ enum : NSInteger {
     }
     y += 30;
 
-    NSBezierPath* group = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(left, y, width, refreshHeight + 2 * rowHeight + 2)
+    NSBezierPath* group = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(left, y, width, refreshHeight + 3 * rowHeight + 3)
                                                           xRadius:10
                                                           yRadius:10];
     if (draw) {
@@ -573,8 +653,8 @@ enum : NSInteger {
     };
 
     // Refresh interval: a segmented control.
-    if (draw) DrawLeft(@"Refresh every", left + inset, y + 12, _label, width - 2 * inset);
-    const NSRect track = NSMakeRect(left + inset, y + 36, width - 2 * inset, 28);
+    if (draw) DrawLeft(@"Refresh every", left + inset, y + 10, _label, width - 2 * inset);
+    const NSRect track = NSMakeRect(left + inset, y + 32, width - 2 * inset, 28);
     const NSInteger choices[4] = {1, 2, 5, 15};
     const NSInteger current = [self.actions cardRefreshMinutes];
     if (draw) FillRounded(track, 7, Tint(0.06));
@@ -604,13 +684,44 @@ enum : NSInteger {
     hairline(y);
     y += 1;
 
+    // Notify at: comma-separated percentages in a field. The card draws the field; a real text
+    // field covers it only while typing.
+    _fieldRect = NSMakeRect(right - inset - 96, y + 8, 96, 24);
+    [self addTarget:kTargetNotify rect:NSInsetRect(_fieldRect, -4, -6)];
+    if (draw) {
+        DrawLeft(@"Notify at", left + inset, y + 4, _label, width / 2);
+        NSString* value = [self.actions cardNotifyAt];
+        if (value.length && [self.actions cardNotificationsBlocked])
+            DrawLeft(@"Allow in System Settings", left + inset, y + 21, Recolored(_footnote, NSColor.systemOrangeColor),
+                     width / 2 + 20);
+        else
+            DrawLeft(@"Comma-separated, like 50,75", left + inset, y + 21, _footnote, width / 2 + 20);
+        if (_editing) FillRounded(NSInsetRect(_fieldRect, -3, -3), 9, [NSColor.controlAccentColor colorWithAlphaComponent:0.4]);
+        FillRounded(_fieldRect, 6, NSColor.textBackgroundColor);
+        if (!_editing) {
+            [Tint(0.14) setStroke];
+            NSBezierPath* edge = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(_fieldRect, 0.25, 0.25) xRadius:6 yRadius:6];
+            edge.lineWidth = 0.5;
+            [edge stroke];
+            if (value.length)
+                DrawLeft(value, _fieldRect.origin.x + 8, _fieldRect.origin.y + 4.5, _body, _fieldRect.size.width - 30);
+            else
+                DrawLeft(@"Off", _fieldRect.origin.x + 8, _fieldRect.origin.y + 4.5,
+                         Recolored(_body, NSColor.placeholderTextColor), 60);
+        }
+        DrawRight(@"%", NSMaxX(_fieldRect) - 8, _fieldRect.origin.y + 4.5, Recolored(_body, NSColor.tertiaryLabelColor), 20);
+    }
+    y += rowHeight;
+    hairline(y);
+    y += 1;
+
     // Launch at login: a switch. The whole row is the target.
     const NSRect loginRow = NSMakeRect(left, y, width, rowHeight);
     [self addTarget:kTargetLogin rect:loginRow];
     if (draw) {
         [self rowBackground:loginRow target:kTargetLogin clip:group];
-        DrawLeft(@"Launch at login", left + inset, y + 13, _label, width - 80);
-        const NSRect knobTrack = NSMakeRect(right - inset - 34, y + 12, 34, 20);
+        DrawLeft(@"Launch at login", left + inset, y + 11, _label, width - 80);
+        const NSRect knobTrack = NSMakeRect(right - inset - 34, y + 10, 34, 20);
         FillRounded(knobTrack, 10, _launchAtLogin ? NSColor.controlAccentColor : Tint(0.16));
         const NSRect knob = NSMakeRect(_launchAtLogin ? NSMaxX(knobTrack) - 18 : knobTrack.origin.x + 2, knobTrack.origin.y + 2, 16, 16);
         [NSGraphicsContext saveGraphicsState];
@@ -632,15 +743,69 @@ enum : NSInteger {
     [self addTarget:kTargetReveal rect:revealRow];
     if (draw) {
         [self rowBackground:revealRow target:kTargetReveal clip:group];
-        DrawLeft(@"Claude Code data", left + inset, y + 13, _label, width / 2);
+        DrawLeft(@"Claude Code data", left + inset, y + 11, _label, width / 2);
         NSDictionary* link = Recolored(_body, NSColor.controlAccentColor);
         const CGFloat w = TextWidth(@"Show in Finder", link);
-        DrawLeft(@"Show in Finder", right - inset - 12 - w, y + 14, link, w + 1);
-        DrawSymbol(_chevron, NSMakePoint(right - inset - 3, y + 22));
+        DrawLeft(@"Show in Finder", right - inset - 12 - w, y + 12, link, w + 1);
+        DrawSymbol(_chevron, NSMakePoint(right - inset - 3, y + 20));
     }
-    y += rowHeight;
+}
 
-    if (draw) DrawLeft(@"Numbers also refresh every time you open this menu.", left + inset, y + 8, _footnote, width - inset);
+// The field the card draws for Notify at becomes editable here: a borderless text field placed
+// over it, which exists only while typing.
+- (void)beginNotifyEditing {
+    if (!_field) {
+        _field = [[NSTextField alloc] initWithFrame:NSZeroRect];
+        _field.bordered = NO;
+        _field.bezeled = NO;
+        _field.drawsBackground = NO;
+        _field.focusRingType = NSFocusRingTypeNone;
+        _field.font = _body[NSFontAttributeName];
+        _field.textColor = NSColor.labelColor;
+        _field.placeholderString = @"Off";
+        _field.formatter = [UQPercentListFormatter new];
+        _field.delegate = self;
+        _field.target = self;
+        _field.action = @selector(notifyFieldReturn:);
+        _field.cell.usesSingleLineMode = YES;
+        _field.cell.scrollable = YES;
+        _field.cell.wraps = NO;
+        _field.accessibilityLabel = @"Notify at, percentages separated by commas";
+    }
+    _field.frame = NSMakeRect(_fieldRect.origin.x + 6, _fieldRect.origin.y + 4, _fieldRect.size.width - 28, 16);
+    _field.stringValue = [self.actions cardNotifyAt];
+    if (!_field.superview) [self addSubview:_field];
+    _editing = YES;
+    [self.window makeFirstResponder:_field];
+    // Select it all, so typing replaces the value and Delete clears it: the menu keeps ⌘A for itself.
+    [_field.currentEditor selectAll:nil];
+    [self setNeedsDisplay:YES];
+}
+
+// Saves what was typed and hands the field back to the card's drawing.
+- (void)endNotifyEditing {
+    if (!_editing) return;
+    _editing = NO;
+    [self.actions cardSetNotifyAt:_field.stringValue];
+    [_field removeFromSuperview];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)notifyFieldReturn:(id)sender {
+    [self.window makeFirstResponder:nil];  // ends editing, which saves
+}
+
+- (void)controlTextDidEndEditing:(NSNotification*)notification {
+    [self endNotifyEditing];
+}
+
+- (BOOL)control:(NSControl*)control textView:(NSTextView*)textView doCommandBySelector:(SEL)command {
+    if (command == @selector(cancelOperation:)) {  // Esc puts the saved value back
+        _field.stringValue = [self.actions cardNotifyAt];
+        [self.window makeFirstResponder:nil];
+        return YES;
+    }
+    return NO;
 }
 
 // One pass that either measures or draws, so layout and drawing never disagree.
@@ -652,7 +817,7 @@ enum : NSInteger {
     CGFloat y = 14;
 
     if (NSString* notice = [self noticeText:now]) {
-        if ([self paints:NSMakeRect(0, y, kCardWidth, 28) draw:draw]) {
+        if (draw) {
             FillRounded(NSMakeRect(left, y, width, 28), 8, [NSColor.systemOrangeColor colorWithAlphaComponent:0.14]);
             DrawSymbol(_warning, NSMakePoint(left + 15, y + 14));
             DrawLeft(notice, left + 28, y + 6.5, _body, width - 36);
@@ -662,15 +827,14 @@ enum : NSInteger {
 
     // Limits: one meter each, session first.
     if (!_hasData || s.windows.empty()) {
-        if ([self paints:NSMakeRect(0, y, kCardWidth, 24) draw:draw])
+        if (draw)
             DrawLeft(_hasData ? @"Usage limits unavailable" : @"Checking your limits…", left, y, _secondary, width);
         y += 24;
     }
     for (size_t i = 0; i < s.windows.size(); ++i) {
         const LimitRow row = MakeLimitRow(s.windows[i], now);
         if (i > 0) y += 18;
-        const BOOL paintRow = [self paints:NSMakeRect(0, y, kCardWidth, 82 + (row.outlook ? 17 : 0)) draw:draw];
-        if (paintRow) {
+        if (draw) {
             const CGFloat usedWidth = TextWidth(@" used", _secondary);
             const CGFloat bigWidth = TextWidth(row.usedText, _big);
             DrawLeft(row.name, left, y + 5, _name, width - bigWidth - usedWidth - 10);
@@ -678,22 +842,22 @@ enum : NSInteger {
             DrawLeft(row.usedText, right - usedWidth - bigWidth, y, _big, bigWidth + 1);
         }
         y += 28;
-        if (paintRow) [self meter:NSMakeRect(left, y, width, 18) row:row];
+        if (draw) [self meter:NSMakeRect(left, y, width, 18) row:row];
         y += 20;
-        if (paintRow) {
+        if (draw) {
             DrawLeft(@"0", left, y, _footnote, 20);
             DrawCentered(@"50%", left + width * 0.5, y, _footnote);
             DrawCentered(@"75%", left + width * 0.75, y, _footnote);
             DrawRight(@"100%", right, y, _footnote, 40);
         }
         y += 17;
-        if (paintRow) {
+        if (draw) {
             const CGFloat used = DrawLeft(row.status, left, y, Recolored(_bodyStrong, row.statusColor), width / 2);
             DrawRight(row.resets, right, y, _secondary, width - used - 12);
         }
         y += 17;
         if (row.outlook) {
-            if (paintRow) {
+            if (draw) {
                 const CGFloat used = DrawLeft(@"At this pace: ", left, y, _secondary, width);
                 DrawLeft(row.outlook, left + used, y, Recolored(_body, row.outlookColor), width - used);
             }
@@ -702,7 +866,7 @@ enum : NSInteger {
     }
     if (!s.windows.empty()) {
         y += 8;
-        if ([self paints:NSMakeRect(0, y, kCardWidth, 15) draw:draw]) {
+        if (draw) {
             FillRounded(NSMakeRect(left, y + 2, 2, 11), 1, NSColor.labelColor);
             DrawLeft(@"Even pace: where you'd be with steady use", left + 8, y, _footnote, width - 8);
         }
@@ -712,7 +876,7 @@ enum : NSInteger {
     // Spending, or Settings in its place.
     if (_settings || s.cost.valid) {
         y += 12;
-        if ([self paints:NSMakeRect(0, y, kCardWidth, 1) draw:draw]) [self separator:y];
+        if (draw) [self separator:y];
         y += 13;
         if (_settings)
             [self settingsAt:y draw:draw];
@@ -723,13 +887,13 @@ enum : NSInteger {
 
     // Footer: name, plan and disk use, then Settings and Quit.
     y += 14;
-    if ([self paints:NSMakeRect(0, y, kCardWidth, 1) draw:draw]) [self separator:y];
+    if (draw) [self separator:y];
     y += 9;
     const NSRect quit = NSMakeRect(right - 26, y, 26, 26);
     const NSRect settings = NSMakeRect(right - 56, y, 26, 26);
     [self addTarget:kTargetSettings rect:settings];
     [self addTarget:kTargetQuit rect:quit];
-    if ([self paints:NSMakeRect(0, y, kCardWidth, 26) draw:draw]) {
+    if (draw) {
         NSMutableArray<NSString*>* facts = [NSMutableArray array];
         if (!s.account.plan.empty()) [facts addObject:NS(s.account.plan)];
         if (s.storage.valid) [facts addObject:[NS(uq::formatBytes(s.storage.total)) stringByAppendingString:@" on disk"]];
@@ -761,6 +925,7 @@ enum : NSInteger {
             [self toggleSettings];
             return;
         case kTargetDone:
+            if (_editing) [self.window makeFirstResponder:nil];
             _settings = NO;
             break;
         case kTargetQuit:
@@ -782,6 +947,7 @@ enum : NSInteger {
 }
 
 - (void)toggleSettings {
+    if (_editing) [self.window makeFirstResponder:nil];
     _settings = !_settings;
     if (_settings) _launchAtLogin = [self.actions cardLaunchesAtLogin];
     _hoverDay = -1;
@@ -803,10 +969,7 @@ enum : NSInteger {
 - (void)setHoverDay:(NSInteger)day {
     if (day == _hoverDay) return;
     _hoverDay = day;
-    if (NSIsEmptyRect(_boxRect))
-        [self setNeedsDisplay:YES];
-    else  // the bars dim around the day, and the box below shows it
-        [self setNeedsDisplayInRect:NSUnionRect(NSInsetRect(_chartRect, -2, -2), _boxRect)];
+    self.needsDisplay = YES;
 }
 
 - (void)mouseMoved:(NSEvent*)event {
@@ -839,6 +1002,11 @@ enum : NSInteger {
 // mouse here until the button comes up.
 - (void)mouseDown:(NSEvent*)event {
     const NSInteger target = [self targetAt:[self convertPoint:event.locationInWindow fromView:nil]];
+    if (target == kTargetNotify) {
+        if (!_editing) [self beginNotifyEditing];
+        return;
+    }
+    if (_editing) [self.window makeFirstResponder:nil];  // saves the field
     if (target == kTargetNone) return;
     _pressedTarget = target;
     [self redrawTarget:target];
@@ -861,6 +1029,10 @@ enum : NSInteger {
 }
 
 - (void)reset {
+    if (_editing) {  // the menu closed while typing: keep what was typed
+        [self.window makeFirstResponder:nil];
+        [self endNotifyEditing];
+    }
     _hoverDay = -1;
     _hoverTarget = kTargetNone;
     _pressedTarget = kTargetNone;
@@ -870,6 +1042,10 @@ enum : NSInteger {
 #ifdef UQ_DEV
 - (BOOL)showingSettings {
     return _settings;
+}
+
+- (BOOL)editingNotify {
+    return _editing;
 }
 
 - (NSInteger)hoverDay {
@@ -894,7 +1070,7 @@ static uq::Snapshot DemoSnapshot(int64_t now);
 static int WritePNG(NSBitmapImageRep* rep, NSString* path);
 #endif
 
-@interface UQAppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate, UQCardActions>
+@interface UQAppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate, UQCardActions, UNUserNotificationCenterDelegate>
 @end
 
 @implementation UQAppDelegate {
@@ -910,6 +1086,9 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     NSString* _glyphKey;
     BOOL _refreshing, _pending, _pendingForMenu;
     BOOL _menuOpen;
+    std::vector<int> _thresholds;  // Notify at
+    uq::AlertTracker _alerts;
+    BOOL _notifyAllowed, _notifyBlocked;
 #ifdef UQ_DEV
     BOOL _demo;  // click test: keep the demo numbers, never fetch
 #endif
@@ -936,6 +1115,10 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
 
     [self configureLoginItemOnFirstRun];
     [self scheduleRefreshTimer];
+    NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
+    _thresholds = uq::parseThresholds([defaults stringForKey:kNotifyAtKey].UTF8String ?: "");
+    _alerts.load([defaults stringForKey:kNotifyStateKey].UTF8String ?: "");
+    if (!_thresholds.empty()) [self requestNotifications];
     __weak UQAppDelegate* weakSelf = self;
     [NSWorkspace.sharedWorkspace.notificationCenter
         addObserverForName:NSWorkspaceDidWakeNotification
@@ -953,6 +1136,12 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             [weakSelf runSoak:args[soak + 1].intValue];
         });
+    if ([args containsObject:@"--notify-test"]) {
+        _demo = YES;  // no fetching: the test feeds its own numbers
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            [weakSelf runNotifyTest];
+        });
+    }
     const NSUInteger clicks = [args indexOfObject:@"--click-test"];
     if (clicks != NSNotFound) {
         _demo = YES;
@@ -1026,6 +1215,7 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     _menuOpen = YES;
     // Every click checks for fresh numbers (the engine spaces out API calls) and measures disk use.
     [self refreshForMenu:YES];
+    if (!_thresholds.empty()) [self readNotificationPermission];
     // Countdowns and pace move once a minute, so redraw just after each minute turns.
     __weak UQCardView* card = _card;
     const double now = NSDate.date.timeIntervalSince1970;
@@ -1091,6 +1281,97 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     [self resizeCard];
 }
 
+- (NSString*)cardNotifyAt {
+    return NS(uq::formatThresholds(_thresholds));
+}
+
+- (void)cardSetNotifyAt:(NSString*)text {
+    _thresholds = uq::parseThresholds(text.UTF8String ?: "");
+    [NSUserDefaults.standardUserDefaults setObject:[self cardNotifyAt] forKey:kNotifyAtKey];
+#ifdef UQ_DEV
+    if (_demo) return;
+#endif
+    if (!_thresholds.empty()) [self requestNotifications];
+}
+
+- (BOOL)cardNotificationsBlocked {
+    return _notifyBlocked;
+}
+
+// MARK: Notifications
+
+// Asks once (macOS shows its prompt the first time); after that it only reports the answer.
+- (void)requestNotifications {
+#ifdef UQ_DEV
+    if (_demo) return;
+#endif
+    UNUserNotificationCenter* center = UNUserNotificationCenter.currentNotificationCenter;
+    center.delegate = self;
+    __weak UQAppDelegate* weakSelf = self;
+    [center requestAuthorizationWithOptions:UNAuthorizationOptionAlert
+                          completionHandler:^(BOOL granted, NSError*) {
+                              dispatch_async(dispatch_get_main_queue(), ^{
+                                  [weakSelf notificationsAllowed:granted];
+                              });
+                          }];
+}
+
+- (void)readNotificationPermission {
+#ifdef UQ_DEV
+    if (_demo) return;
+#endif
+    __weak UQAppDelegate* weakSelf = self;
+    [UNUserNotificationCenter.currentNotificationCenter getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings* settings) {
+        const UNAuthorizationStatus status = settings.authorizationStatus;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (status == UNAuthorizationStatusNotDetermined)
+                [weakSelf requestNotifications];
+            else
+                [weakSelf notificationsAllowed:status == UNAuthorizationStatusAuthorized];
+        });
+    }];
+}
+
+- (void)notificationsAllowed:(BOOL)allowed {
+    const BOOL changed = allowed != _notifyAllowed || allowed == _notifyBlocked;
+    _notifyAllowed = allowed;
+    _notifyBlocked = !allowed;
+    if (changed) [_card setNeedsDisplay:YES];
+    [self checkAlerts];
+}
+
+// After each refresh: a notification for every limit that reached one of the Notify at values.
+- (void)checkAlerts {
+    if (_thresholds.empty() || !_notifyAllowed || _snapshot.updatedAt == 0) return;
+    const int64_t now = uq::nowSeconds();
+    const std::vector<uq::Alert> alerts = _alerts.check(_snapshot.windows, _thresholds, now);
+    if (alerts.empty()) return;
+    for (const uq::Alert& alert : alerts) [self post:alert now:now];
+    [NSUserDefaults.standardUserDefaults setObject:NS(_alerts.save()) forKey:kNotifyStateKey];
+}
+
+- (void)post:(const uq::Alert&)alert now:(int64_t)now {
+    const uq::LimitWindow& w = alert.window;
+    UNMutableNotificationContent* content = [UNMutableNotificationContent new];
+    content.title = [NSString stringWithFormat:@"%@ reached %d%%", NS(w.title), alert.percent];
+    content.body = [NSString stringWithFormat:@"Resets %@ · in %@", ClockTime(w.resetsAt, now),
+                                              NS(uq::formatCountdown(w.resetsAt - now))];
+    content.threadIdentifier = NS(w.title);
+    NSString* identifier = [NSString stringWithFormat:@"%@ %lld %d", NS(w.title), (long long)w.resetsAt, alert.percent];
+    [UNUserNotificationCenter.currentNotificationCenter
+        addNotificationRequest:[UNNotificationRequest requestWithIdentifier:identifier content:content trigger:nil]
+         withCompletionHandler:^(NSError* error) {
+             if (error) NSLog(@"Usage?: notification: %@", error.localizedDescription);
+         }];
+}
+
+// Shown even while the menu is open, when Usage? counts as the active app.
+- (void)userNotificationCenter:(UNUserNotificationCenter*)center
+       willPresentNotification:(UNNotification*)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
+    completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList);
+}
+
 - (void)quit:(id)sender {
     [NSApp terminate:nil];
 }
@@ -1141,6 +1422,7 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     [_card showSnapshot:snapshot];
     [self resizeCard];
     [self updateStatusItem];
+    [self checkAlerts];
 }
 
 - (NSInteger)refreshMinutes {
@@ -1227,12 +1509,48 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     });
 }
 
+// `UsageQ --notify-test`: asks macOS for permission (its prompt appears the first time), sends one
+// "Session reached 75%" notification through the same code as real alerts, then reports what macOS
+// says: permission, alert style (Persistent or Temporary) and whether the notification arrived.
+- (void)runNotifyTest {
+    UNUserNotificationCenter* center = UNUserNotificationCenter.currentNotificationCenter;
+    center.delegate = self;
+    [center requestAuthorizationWithOptions:UNAuthorizationOptionAlert
+                          completionHandler:^(BOOL granted, NSError* error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            printf("permission: %s%s\n", granted ? "allowed" : "not allowed",
+                   error ? [NSString stringWithFormat:@" (%@)", error.localizedDescription].UTF8String : "");
+            if (granted) {
+                const int64_t now = uq::nowSeconds();
+                uq::LimitWindow session{"Session", 75, (now + 2 * 3600) / 60 * 60, 300, true};
+                [self post:uq::Alert{session, 75} now:now];
+            }
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings* settings) {
+                    const char* style = settings.alertStyle == UNAlertStyleAlert    ? "Persistent"
+                                        : settings.alertStyle == UNAlertStyleBanner ? "Temporary"
+                                                                                    : "none";
+                    printf("alert style: %s\n", style);
+                    [center getDeliveredNotificationsWithCompletionHandler:^(NSArray<UNNotification*>* delivered) {
+                        printf("delivered: %lu\n", (unsigned long)delivered.count);
+                        for (UNNotification* n in delivered) printf("  %s · %s\n", n.request.content.title.UTF8String,
+                                                                    n.request.content.body.UTF8String);
+                        fflush(stdout);
+                        exit(granted ? 0 : 1);
+                    }];
+                }];
+            });
+        });
+    }];
+}
+
 // `UsageQ --click-test [out.png]`: opens the menu on demo numbers and uses the card the way a
 // person would, checking each result while the menu stays open. `quit` or `cmdq` instead of a
 // path checks that the power button or ⌘Q quits.
 - (void)runClickTest:(NSString*)png {
     NSUserDefaults* defaults = NSUserDefaults.standardUserDefaults;
     id savedMinutes = [defaults objectForKey:kRefreshMinutesKey];
+    id savedNotify = [defaults objectForKey:kNotifyAtKey];
     const BOOL quit = [png isEqualToString:@"quit"] || [png isEqualToString:@"cmdq"];
     __block int failures = 0;
     void (^check)(BOOL, NSString*) = ^(BOOL ok, NSString* what) {
@@ -1271,12 +1589,22 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
         post(NSEventTypeLeftMouseDown, p);
         post(NSEventTypeLeftMouseUp, p);
     };
-    void (^key)(CGKeyCode) = ^(CGKeyCode code) {  // through the window server, like a keyboard
+    void (^press)(CGKeyCode, CGEventFlags) = ^(CGKeyCode code, CGEventFlags flags) {  // like a keyboard, to this app only
         for (bool down : {true, false}) {
             CGEventRef e = CGEventCreateKeyboardEvent(nullptr, code, down);
-            CGEventSetFlags(e, kCGEventFlagMaskCommand);
+            CGEventSetFlags(e, flags);
             CGEventPostToPid(getpid(), e);
             CFRelease(e);
+        }
+    };
+    void (^key)(CGKeyCode) = ^(CGKeyCode code) {
+        press(code, kCGEventFlagMaskCommand);
+    };
+    void (^type)(NSString*) = ^(NSString* text) {  // digits, commas and Return, by virtual key code
+        static const CGKeyCode digits[10] = {29, 18, 19, 20, 21, 23, 22, 26, 28, 25};
+        for (NSUInteger i = 0; i < text.length; ++i) {
+            const unichar c = [text characterAtIndex:i];
+            press(c == ',' ? 43 : c == '\n' ? 36 : c == 'x' ? 7 : digits[c - '0'], 0);
         }
     };
     __weak UQAppDelegate* weakSelf = self;
@@ -1294,8 +1622,30 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     } else {
         [steps addObject:^{ click(kTargetSettings); }];
         [steps addObject:^{ check(card.showingSettings && menuOpen(), @"the gear opens Settings in the card; the menu stays open"); }];
+        [steps addObject:^{ click(kTargetNotify); }];
+        [steps addObject:^{ check(card.editingNotify && menuOpen(), @"clicking Notify at starts typing"); }];
+        [steps addObject:^{ type(@"50,7x5\n"); }];  // the x is refused
+        [steps addObject:^{
+            check([[defaults stringForKey:kNotifyAtKey] isEqualToString:@"50,75"] && !card.editingNotify && menuOpen(),
+                  @"typing 50,75 and Return saves it; letters are refused");
+        }];
+        [steps addObject:^{ click(kTargetNotify); }];
+        [steps addObject:^{
+            press(124, 0);  // Right arrow: the caret moves to the end
+            type(@",90\n");
+        }];
+        [steps addObject:^{ check([[defaults stringForKey:kNotifyAtKey] isEqualToString:@"50,75,90"], @"the arrow keys move the caret to add a value"); }];
+        [steps addObject:^{ click(kTargetNotify); }];
+        [steps addObject:^{
+            press(51, 0);  // Delete removes the selected value
+            type(@"\n");
+        }];
+        [steps addObject:^{ check([defaults stringForKey:kNotifyAtKey].length == 0 && menuOpen(), @"clearing the field turns it off"); }];
+        [steps addObject:^{ click(kTargetNotify); }];
+        [steps addObject:^{ type(@"60"); }];  // no Return: the next click saves it
         [steps addObject:^{ click(kTargetInterval + 15); }];
         [steps addObject:^{ check([weakSelf refreshMinutes] == 15 && menuOpen(), @"a refresh interval can be picked"); }];
+        [steps addObject:^{ check([[defaults stringForKey:kNotifyAtKey] isEqualToString:@"60"], @"clicking elsewhere saves what was typed"); }];
         [steps addObject:^{
             if (png) {
                 NSBitmapImageRep* rep = [card bitmapImageRepForCachingDisplayInRect:card.bounds];
@@ -1317,6 +1667,9 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
         [steps addObject:^{ click(kTargetSettings); }];
         [steps addObject:^{ click(kTargetSettings); }];
         [steps addObject:^{ check(!card.showingSettings && menuOpen(), @"the gear also closes Settings"); }];
+        [steps addObject:^{ click(kTargetSettings); }];
+        [steps addObject:^{ click(kTargetNotify); }];
+        [steps addObject:^{ type(@"70"); }];  // the menu closes next, mid-typing
     }
     NSMenu* menu = _menu;
     __block NSUInteger next = 0;
@@ -1340,10 +1693,15 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     }
     check(next == steps.count, @"every step ran with the menu open");
     check(!_card.showingSettings, @"closing the menu resets the card");
+    check([[defaults stringForKey:kNotifyAtKey] isEqualToString:@"70"], @"closing the menu while typing keeps what was typed");
     if (savedMinutes)
         [defaults setObject:savedMinutes forKey:kRefreshMinutesKey];
     else
         [defaults removeObjectForKey:kRefreshMinutesKey];
+    if (savedNotify)
+        [defaults setObject:savedNotify forKey:kNotifyAtKey];
+    else
+        [defaults removeObjectForKey:kNotifyAtKey];
     printf("%s\n", failures ? "click test FAILED" : "click test passed");
     exit(failures ? 1 : 0);
 }
@@ -1423,6 +1781,14 @@ static uq::Snapshot DemoSnapshot(int64_t now) {
 }
 - (void)cardNeedsResize {
 }
+- (NSString*)cardNotifyAt {
+    return getenv("UQ_RENDER_NOTIFY") ? @(getenv("UQ_RENDER_NOTIFY")) : @"50,75";
+}
+- (void)cardSetNotifyAt:(NSString*)text {
+}
+- (BOOL)cardNotificationsBlocked {
+    return NO;
+}
 @end
 
 static NSBitmapImageRep* Bitmap(CGFloat w, CGFloat h, CGFloat scale) {
@@ -1472,16 +1838,12 @@ static int RenderCard(NSString* path, BOOL dark, NSInteger hoverDay, BOOL demo, 
     view.appearance = appearance;
     NSBitmapImageRep* rep = Bitmap(kCardWidth, height, 2);
     CGContextRef cg = [NSGraphicsContext graphicsContextWithBitmapImageRep:rep].CGContext;
-    CGContextTranslateCTM(cg, 0, height);
-    CGContextScaleCTM(cg, 1, -1);
     [NSGraphicsContext saveGraphicsState];
-    NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithCGContext:cg flipped:YES];
-    [appearance performAsCurrentDrawingAppearance:^{
-        [[NSColor colorWithSRGBRed:dark ? 0.165 : 0.937 green:dark ? 0.165 : 0.937 blue:dark ? 0.17 : 0.94 alpha:1] setFill];
-        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0, 0, kCardWidth, height) xRadius:12 yRadius:12] fill];
-        [view drawRect:view.bounds];
-    }];
+    NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithCGContext:cg flipped:NO];
+    [[NSColor colorWithSRGBRed:dark ? 0.165 : 0.937 green:dark ? 0.165 : 0.937 blue:dark ? 0.17 : 0.94 alpha:1] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0, 0, kCardWidth, height) xRadius:12 yRadius:12] fill];
     [NSGraphicsContext restoreGraphicsState];
+    [view renderInto:cg];
     return WritePNG(rep, path);
 }
 

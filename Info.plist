@@ -6,6 +6,8 @@
 	<string>en</string>
 	<key>CFBundleExecutable</key>
 	<string>UsageQ</string>
+	<key>CFBundleIconFile</key>
+	<string>UsageQ</string>
 	<key>CFBundleIdentifier</key>
 	<string>dev.usageq.UsageQ</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -20,6 +22,8 @@
 	<string>__VERSION__</string>
 	<key>CFBundleVersion</key>
 	<string>__VERSION__</string>
+	<key>NSUserNotificationAlertStyle</key>
+	<string>alert</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>27.0</string>
 	<key>LSUIElement</key>

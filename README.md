@@ -24,6 +24,7 @@ A tiny, native macOS menu bar app for your Claude Code limits and spending.</p>
 - **Plain answers.** *12% in reserve*, *At this pace: lasts until reset*, or *100% by Wed 9:14 AM*. Resets are shown as clock times, *Resets 6:15 PM · in 2h 29m*.
 - **Spending.** Cost and tokens for Today, This week, Last week and the last 30 days, estimated at API prices from your local Claude Code logs.
 - **30 days at a glance.** Daily cost and token bars, with your top two models over those 30 days. Hover a day to see that day's totals and top two models instead.
+- **Notifications at your percentages.** Type `50,75` under Settings › Notify at, and Usage? tells you when a limit reaches each value, once per reset period.
 - **The essentials, nothing else.** Your plan, the disk space Claude Code uses, Settings and Quit, all in one footer.
 - **In the menu bar.** Two tiny meters (session and weekly) and how much of your session you've used.
 
@@ -45,7 +46,8 @@ make install
 
 - **Click the meters icon** to open the card. Every click refreshes the numbers.
 - **Hover the bars** to inspect any of the last 30 days. Move the pointer down and the day stays selected while you read it. Move away and the box goes back to the whole 30 days.
-- **⚙︎ Settings** open right inside the card: refresh every 1, 2, 5 or 15 minutes (default 5), launch at login, and show Claude Code's data in Finder. **Done** (or ⚙︎ again) takes you back.
+- **⚙︎ Settings** open right inside the card: refresh every 1, 2, 5 or 15 minutes (default 5), Notify at, launch at login, and show Claude Code's data in Finder. **Done** (or ⚙︎ again) takes you back.
+- **Notify at** takes whole percentages separated by commas, like `50,75` or `50,75,90`; leave it empty for no notifications. Each limit (the session and each weekly limit) notifies once per value per reset period, checked whenever the numbers refresh. macOS asks for permission the first time. To keep the notifications on screen until you close them, choose **Persistent** in System Settings › Notifications › Usage?.
 - **⏻ Quit**, or press ⌘Q while the card is open.
 - When the numbers aren't fresh, for example offline, a short note at the top says so and shows how old they are.
 
@@ -75,20 +77,22 @@ Storage        1.4 GB
 - **Pace** compares your usage with steady use since the window opened. If your current rate would reach 100% before the reset, you see when.
 - **Spending** is read from `~/.claude/projects/**/*.jsonl`. Each API response counts once, even though Claude Code logs it repeatedly. Prices follow Anthropic's API list prices, including cache writes (5-minute vs 1-hour), long-context tiers and fast mode. These are API-equivalent estimates; a subscription doesn't bill this way.
 - The usage endpoint rate-limits bursts. The app calls it at most every 30 seconds and backs off when told to; the local log scan runs on every click.
+- **Notifications** are posted by the app itself after a refresh, through macOS's own notification system. Nothing is sent anywhere else.
 
 ## Small on purpose
 
-About 10 MB of memory when idle and about 13 MB after the card has been opened. Hovering through the chart and opening Settings sets up more of macOS's drawing machinery, up to about 21 MB, where it stays; much of that is memory macOS reclaims when it needs it. An empty AppKit menu bar app needs 8–14 MB on its own.
+About 15 MB of memory when idle and about 19 MB after the card has been opened and used, where it stays. An empty AppKit menu bar app takes 11 MB on the same Mac. Measured with `footprint` on macOS 27.0.1: idle 10 seconds after launch, and after 20 rounds of opening the card, hovering every bar and opening Settings.
 
 - The data layer (`src/core`) is plain C++20. The app (`src/app/main.mm`) is a thin AppKit shell, and the card is a single custom-drawn view using SF Pro, SF Symbols and system colors.
 - Keychain and network access run in short-lived helper processes, so no networking stack stays loaded.
 - The log scanner reads only newly appended lines after the first pass. That first pass finds usage records with NEON vector instructions, so 30 days of logs (about 1 GB here) take about 0.2 s. Its buffers live on their own memory pages and are handed back to the system after every pass.
 - Routine refreshes run at background priority, so they stay on the efficiency cores. Opening the card refreshes at full speed.
-- While the card is open, only the part that changes is redrawn, and the clock-driven parts update once a minute.
+- The card is drawn on the CPU into a plain image that macOS shows as it is. Drawing it the usual way would load Metal into the app and keep megabytes of GPU buffers for its lifetime. While the card is open, the clock-driven parts update once a minute.
 
 ```sh
 make leakcheck   # Apple's `leaks` on the CLI, then on the app through 100 cycles of refresh, hover and Settings
-make clicktest   # opens the real menu on demo data and clicks through it: Settings, Done, hover
+make test        # unit tests for the core, with AddressSanitizer and UBSan
+make clicktest   # opens the real menu on demo data and uses it: Settings, typing in Notify at, Done, hover
 ```
 
 The app's own code shows zero leaks. `leaks` does list 26 KB from Apple's AppIntents framework, which an empty AppKit app reports identically.
@@ -100,6 +104,7 @@ make            # app + CLI in build/
 make dev        # debuggable build with test hooks:
                 #   --soak N                         refresh, hover and Settings cycles, printing memory
                 #   --click-test [out.png|quit|cmdq] click through the open menu, checking each step
+                #   --notify-test                    send one test notification and report what macOS says
                 #   --render out.png --demo          draw the card with demo data (--dark, --day N, --stale, --settings)
                 #   --render-bar out.png [--dark]    draw the menu bar item
 ```
