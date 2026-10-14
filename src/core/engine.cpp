@@ -16,8 +16,13 @@ void Engine::refresh(int64_t now, bool measureStorageNow) {
     auto tokenHash = [this] { return creds_.valid() ? fnv1a(creds_.accessToken) : 0; };
     if (!creds_.valid() || creds_.expired(now) || tokenHash() == rejectedToken_) {
         // Claude Code renews its own token; re-read the Keychain until a usable one shows up.
+        const uint64_t before = tokenHash();
         Credentials fresh;
         if (readCredentials(fresh)) creds_ = std::move(fresh);
+        if (tokenHash() != before) {  // a new sign-in: check with it right away
+            lastFetchAt_ = 0;
+            if (lastError_ == FetchError::Unauthorized) lastError_ = FetchError::None;
+        }
     }
     if (snap_.account.email.empty() || now - accountReadAt_ >= 600) {
         snap_.account = readAccount(creds_);
@@ -53,20 +58,33 @@ void Engine::refresh(int64_t now, bool measureStorageNow) {
 
     // Transient failures stay quiet while the last update is recent; the card shows its age.
     const bool fresh = snap_.updatedAt > 0 && now - snap_.updatedAt < 900;
+    NoticeKind kind = NoticeKind::None;
     if (!creds_.valid())
-        snap_.notice = "Not signed in — run claude to log in";
+        kind = NoticeKind::SignedOut;
     else if (!usable || lastError_ == FetchError::Unauthorized)
-        snap_.notice = "Sign-in expired — open Claude Code to renew it";
+        kind = NoticeKind::Renew;
     else if (lastError_ == FetchError::Forbidden)
-        snap_.notice = "This login can't read usage limits";
+        kind = NoticeKind::NoAccess;
     else if (lastError_ == FetchError::BadResponse)
-        snap_.notice = "Unexpected response from Claude (HTTP " + std::to_string(lastStatus_) + ")";
+        kind = NoticeKind::BadResponse;
     else if (lastError_ == FetchError::RateLimited && !fresh)
-        snap_.notice = "Claude is rate limiting checks";
+        kind = NoticeKind::RateLimited;
     else if (lastError_ == FetchError::Network && !fresh)
-        snap_.notice = "Offline";
-    else
-        snap_.notice.clear();
+        kind = NoticeKind::Offline;
+    snap_.noticeKind = kind;
+    snap_.httpStatus = lastStatus_;
+    snap_.retryAt = kind == NoticeKind::RateLimited ? retryAfter_ : 0;
+    switch (kind) {
+        case NoticeKind::None: snap_.notice.clear(); break;
+        case NoticeKind::SignedOut: snap_.notice = "Claude Code isn't signed in"; break;
+        case NoticeKind::Renew: snap_.notice = "Claude Code's sign-in needs renewing"; break;
+        case NoticeKind::NoAccess: snap_.notice = "This sign-in can't show usage limits"; break;
+        case NoticeKind::BadResponse:
+            snap_.notice = "Claude sent an unexpected reply (HTTP " + std::to_string(lastStatus_) + ")";
+            break;
+        case NoticeKind::RateLimited: snap_.notice = "Claude is limiting how often Usage? checks"; break;
+        case NoticeKind::Offline: snap_.notice = "You're offline"; break;
+    }
 
     scanner_.update(now);
     snap_.cost = scanner_.summarize(now, weeklyWindowEnd(snap_.windows, now));
@@ -75,6 +93,20 @@ void Engine::refresh(int64_t now, bool measureStorageNow) {
         snap_.storage = measureStorage();
         storageAt_ = now;
     }
+}
+
+std::string noticeHint(NoticeKind kind) {
+    switch (kind) {
+        case NoticeKind::SignedOut: return "Run claude and sign in with your Claude account.";
+        case NoticeKind::Renew:
+            return "Claude Code renews it each time it runs: run claude, type /usage, then check again.";
+        case NoticeKind::NoAccess: return "Usage? needs a Claude plan sign-in, not an API key: run /login in Claude Code.";
+        case NoticeKind::BadResponse: return "Try again in a minute.";
+        case NoticeKind::RateLimited: return "Try again in a few minutes.";
+        case NoticeKind::Offline: return "Check your internet connection.";
+        case NoticeKind::None: break;
+    }
+    return {};
 }
 
 int64_t weeklyWindowEnd(const std::vector<LimitWindow>& windows, int64_t now) {
@@ -124,6 +156,9 @@ std::string snapshotJSON(const Snapshot& s, int64_t now) {
     o += ",\n  \"notice\": ";
     if (s.notice.empty()) o += "null";
     else json::appendQuoted(o, s.notice);
+    o += ",\n  \"notice_hint\": ";
+    if (s.notice.empty()) o += "null";
+    else json::appendQuoted(o, noticeHint(s.noticeKind));
 
     o += ",\n  \"account\": {\"email\": ";
     json::appendQuoted(o, s.account.email);
@@ -237,7 +272,7 @@ std::string snapshotText(const Snapshot& s, int64_t now) {
     if (!s.account.plan.empty()) o += " \u00B7 " + s.account.plan;
     o += s.updatedAt ? " \u00B7 updated " + formatAgo(now - s.updatedAt) : std::string(" \u00B7 limits unavailable");
     o += "\n";
-    if (!s.notice.empty()) o += "! " + s.notice + "\n";
+    if (!s.notice.empty()) o += "! " + s.notice + "\n  " + noticeHint(s.noticeKind) + "\n";
     for (const LimitWindow& raw : s.windows) {
         const LimitWindow w = effectiveWindow(raw, now);
         std::string line = pad(w.title, 15) + pad(formatPercent(w.usedPercent) + " used", 10);

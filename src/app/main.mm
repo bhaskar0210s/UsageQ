@@ -336,7 +336,7 @@ enum : NSInteger {
     NSInteger _hoverDay, _hoverTarget, _pressedTarget;
     std::vector<std::pair<NSRect, NSInteger>> _targets;
     NSTrackingArea* _tracking;
-    NSDictionary *_name, *_big, *_body, *_bodyStrong, *_secondary, *_small, *_footnote, *_label;
+    NSDictionary *_name, *_big, *_body, *_bodyStrong, *_secondary, *_small, *_footnote, *_label, *_noticeText;
     NSImage *_gear, *_gearHot, *_power, *_powerHot, *_warning, *_chevron;
 }
 
@@ -356,6 +356,7 @@ enum : NSInteger {
         _secondary = TextStyle([NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular], NSColor.secondaryLabelColor);
         _small = TextStyle([NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular], NSColor.secondaryLabelColor);
         _footnote = TextStyle([NSFont monospacedDigitSystemFontOfSize:10.5 weight:NSFontWeightRegular], NSColor.tertiaryLabelColor);
+        _noticeText = TextStyle([NSFont systemFontOfSize:11.5 weight:NSFontWeightRegular], NSColor.secondaryLabelColor);
         _gear = Symbol(@"gearshape", 13, NSFontWeightRegular, NSColor.secondaryLabelColor);
         _gearHot = Symbol(@"gearshape.fill", 13, NSFontWeightRegular, NSColor.labelColor);
         _power = Symbol(@"power", 13, NSFontWeightRegular, NSColor.secondaryLabelColor);
@@ -466,13 +467,65 @@ enum : NSInteger {
 }
 
 // What the card warns about, if anything: offline, signed out, rate limited.
-- (NSString*)noticeText:(int64_t)now {
+// What to do about the notice, in short lines; `code` spans are set in a monospaced font.
+- (NSString*)noticeDetail:(int64_t)now {
     const uq::Snapshot& s = _snap;
-    if (!_hasData || s.notice.empty()) return nil;
-    NSString* notice = NS(s.notice);
-    if (s.updatedAt > 0 && (s.notice == "Offline" || s.notice == "Claude is rate limiting checks"))
-        notice = [notice stringByAppendingFormat:@" · showing numbers from %@", NS(uq::formatAgo(now - s.updatedAt))];
-    return notice;
+    NSString* age = s.updatedAt > 0
+                        ? [NSString stringWithFormat:@"The numbers below are from %@.", NS(uq::formatAgo(now - s.updatedAt))]
+                        : @"";
+    switch (s.noticeKind) {
+        case uq::NoticeKind::SignedOut:
+            return @"Usage? reads your limits through Claude Code's sign-in.\n"
+                   @"1. Open Terminal and run `claude`.\n"
+                   @"2. Sign in with your Claude account.\n"
+                   @"3. Open this menu again.";
+        case uq::NoticeKind::Renew:
+            return [@"Claude Code renews it each time it runs, and Usage? picks it up by itself. To renew it now:\n"
+                    @"1. Open Terminal and run `claude`.\n"
+                    @"2. Type `/usage` and press Return.\n" stringByAppendingString:age];
+        case uq::NoticeKind::NoAccess:
+            return @"Usage? needs Claude Code signed in with a Claude plan, not an API key.\n"
+                   @"1. In Claude Code, run `/login`.\n"
+                   @"2. Choose your Claude account.";
+        case uq::NoticeKind::BadResponse:
+            return [@"Usage? tries again at the next refresh. " stringByAppendingString:age];
+        case uq::NoticeKind::RateLimited:
+            return [[NSString stringWithFormat:@"Usage? checks again at %@. ", ClockTime(s.retryAt, now)]
+                stringByAppendingString:age];
+        case uq::NoticeKind::Offline:
+            return [@"Usage? updates when you're back online. " stringByAppendingString:age];
+        case uq::NoticeKind::None:
+            break;
+    }
+    return @"";
+}
+
+- (NSAttributedString*)noticeBody:(int64_t)now {
+    NSMutableAttributedString* text = [NSMutableAttributedString new];
+    NSArray<NSString*>* parts = [[self noticeDetail:now] componentsSeparatedByString:@"`"];
+    NSDictionary* code = TextStyle([NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightMedium], NSColor.labelColor);
+    for (NSUInteger i = 0; i < parts.count; ++i)
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:parts[i] attributes:i % 2 ? code : _noticeText]];
+    NSMutableParagraphStyle* lines = [NSMutableParagraphStyle new];
+    lines.paragraphSpacing = 2;
+    [text addAttribute:NSParagraphStyleAttributeName value:lines range:NSMakeRange(0, text.length)];
+    return text;
+}
+
+// The notice at the top of the card: what's wrong, then what to do. Returns the height used.
+- (CGFloat)noticeAt:(CGFloat)y draw:(BOOL)draw now:(int64_t)now {
+    const CGFloat left = kPad, width = kCardWidth - 2 * kPad, textLeft = left + 30, textWidth = width - 40;
+    NSAttributedString* body = [self noticeBody:now];
+    const NSStringDrawingOptions options = NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading;
+    const CGFloat bodyHeight = body.length ? ceil([body boundingRectWithSize:NSMakeSize(textWidth, 1000) options:options].size.height) : 0;
+    const CGFloat height = 9 + 16 + (bodyHeight ? 3 + bodyHeight : 0) + 10;
+    if (draw) {
+        FillRounded(NSMakeRect(left, y, width, height), 10, [NSColor.systemOrangeColor colorWithAlphaComponent:0.14]);
+        DrawSymbol(_warning, NSMakePoint(left + 16, y + 17));
+        DrawLeft(NS(_snap.notice), textLeft, y + 9, _bodyStrong, textWidth);
+        if (bodyHeight) [body drawWithRect:NSMakeRect(textLeft, y + 9 + 16 + 3, textWidth, bodyHeight) options:options];
+    }
+    return height;
 }
 
 // The bullet meter: 0-50 / 50-75 / 75-100 bands, the used bar, the even-pace marker and the
@@ -818,14 +871,7 @@ enum : NSInteger {
     _targets.clear();
     CGFloat y = 14;
 
-    if (NSString* notice = [self noticeText:now]) {
-        if (draw) {
-            FillRounded(NSMakeRect(left, y, width, 28), 8, [NSColor.systemOrangeColor colorWithAlphaComponent:0.14]);
-            DrawSymbol(_warning, NSMakePoint(left + 15, y + 14));
-            DrawLeft(notice, left + 28, y + 6.5, _body, width - 36);
-        }
-        y += 28 + 14;
-    }
+    if (_hasData && s.noticeKind != uq::NoticeKind::None) y += [self noticeAt:y draw:draw now:now] + 14;
 
     // Limits: one meter each, session first.
     if (!_hasData || s.windows.empty()) {
@@ -1081,6 +1127,7 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     NSMenuItem* _cardItem;
     UQCardView* _card;
     NSTimer* _refreshTimer;
+    NSTimer* _signInTimer;  // while waiting for Claude Code's sign-in
     NSTimer* _clockTimer;
     dispatch_queue_t _queue;
     uq::Engine* _engine;
@@ -1430,6 +1477,29 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path);
     [self resizeCard];
     [self updateStatusItem];
     [self checkAlerts];
+    [self watchSignIn];
+}
+
+// While Claude Code's sign-in is missing or ran out, look for a new one every minute. Each look
+// reads the Keychain locally; Usage? calls Claude only once a new sign-in shows up.
+- (void)watchSignIn {
+    const uq::NoticeKind kind = _snapshot.noticeKind;
+    const BOOL waiting = (kind == uq::NoticeKind::Renew || kind == uq::NoticeKind::SignedOut) && [self refreshMinutes] > 0;
+#ifdef UQ_DEV
+    if (_demo) return;
+#endif
+    if (!waiting) {
+        [_signInTimer invalidate];
+        _signInTimer = nil;
+    } else if (!_signInTimer) {
+        __weak UQAppDelegate* weakSelf = self;
+        _signInTimer = [NSTimer scheduledTimerWithTimeInterval:60
+                                                       repeats:YES
+                                                         block:^(NSTimer*) {
+                                                             [weakSelf refreshForMenu:NO];
+                                                         }];
+        _signInTimer.tolerance = 10;
+    }
 }
 
 // 5, 15 or 60 minutes, or 0 when automatic refresh is off (stored as -1). Choices from older
@@ -1826,15 +1896,21 @@ static int WritePNG(NSBitmapImageRep* rep, NSString* path) {
     return [png writeToFile:path atomically:YES] ? 0 : 1;
 }
 
-// `UsageQ --render out.png [--dark] [--day N] [--demo] [--stale] [--settings]` draws the menu card
+// `UsageQ --render out.png [--dark] [--day N] [--demo] [--stale] [--settings] [--notice KIND]` draws the menu card
 // with live (or demo) data, optionally with day N (0-29, 29 = today) hovered or Settings open.
-static int RenderCard(NSString* path, BOOL dark, NSInteger hoverDay, BOOL demo, BOOL stale, BOOL settings) {
+static int RenderCard(NSString* path, BOOL dark, NSInteger hoverDay, BOOL demo, BOOL stale, BOOL settings, int notice) {
     uq::Snapshot snapshot;
     if (demo) {
         snapshot = DemoSnapshot(uq::nowSeconds());
-        if (stale) {
-            snapshot.notice = "Offline";
-            snapshot.updatedAt = uq::nowSeconds() - 12 * 60;
+        if (stale) notice = int(uq::NoticeKind::Offline);
+        if (notice > 0) {
+            static const char* titles[] = {"", "Claude Code isn't signed in", "Claude Code's sign-in needs renewing",
+                                           "This sign-in can't show usage limits", "Claude sent an unexpected reply (HTTP 503)",
+                                           "Claude is limiting how often Usage? checks", "You're offline"};
+            snapshot.noticeKind = uq::NoticeKind(notice);
+            snapshot.notice = titles[notice];
+            snapshot.updatedAt = uq::nowSeconds() - 2 * 3600 - 12 * 60;
+            snapshot.retryAt = uq::nowSeconds() + 20 * 60;
         }
     } else {
         uq::Engine engine;
@@ -1896,14 +1972,16 @@ int main(int argc, const char* argv[]) {
         if (argc >= 3 && !strcmp(argv[1], "--render")) {
             BOOL dark = NO, demo = NO, stale = NO, settings = NO;
             NSInteger day = -1;
+            int notice = 0;
             for (int i = 3; i < argc; ++i) {
                 if (!strcmp(argv[i], "--dark")) dark = YES;
                 if (!strcmp(argv[i], "--demo")) demo = YES;
                 if (!strcmp(argv[i], "--stale")) stale = YES;
                 if (!strcmp(argv[i], "--settings")) settings = YES;
                 if (!strcmp(argv[i], "--day") && i + 1 < argc) day = atoi(argv[++i]);
+                if (!strcmp(argv[i], "--notice") && i + 1 < argc) notice = atoi(argv[++i]);
             }
-            return RenderCard(@(argv[2]), dark, day, demo, stale, settings);
+            return RenderCard(@(argv[2]), dark, day, demo, stale, settings, notice);
         }
 #endif
         NSApplication* app = NSApplication.sharedApplication;

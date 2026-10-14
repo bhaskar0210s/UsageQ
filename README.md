@@ -51,7 +51,7 @@ make install
 - **⚙︎ Settings** open right inside the card: refresh every 5 minutes (the default), 15 minutes or 1 hour, or Off; Notify at; launch at login; and show Claude Code's data in Finder. **Done** (or ⚙︎ again) takes you back. With refresh Off, the numbers update only when you open the menu (and once at launch), and so do the Notify at checks.
 - **Notify at** takes whole percentages separated by commas, like `50,75` or `50,75,90`; leave it empty for no notifications. Each limit (the session and each weekly limit) notifies once per value per reset period, checked whenever the numbers refresh. macOS asks for permission the first time. To keep the notifications on screen until you close them, choose **Persistent** in System Settings › Notifications › Usage?.
 - **⏻ Quit**, or press ⌘Q while the card is open.
-- When the numbers aren't fresh, for example offline, a short note at the top says so and shows how old they are.
+- When something needs your attention, a note at the top of the card says what happened and what to do, step by step, and how old the numbers below are. Claude Code's sign-in, for example, runs out every few hours and renews itself whenever Claude Code runs; until then, Usage? checks for the new sign-in every minute without contacting Claude.
 
 ## For scripts and agents
 

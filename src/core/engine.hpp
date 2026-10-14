@@ -11,10 +11,24 @@
 
 namespace uq {
 
+// Why the limits may be missing or stale.
+enum class NoticeKind {
+    None,
+    SignedOut,    // Claude Code has no sign-in on this Mac
+    Renew,        // Claude Code's sign-in ran out; it renews it the next time it runs
+    NoAccess,     // the sign-in can't read usage limits (an API key, not a Claude plan)
+    BadResponse,  // the server answered with something unexpected
+    RateLimited,  // the server asked Usage? to check less often
+    Offline,
+};
+
 struct Snapshot {
     int64_t updatedAt = 0;              // last successful limits fetch
     std::vector<LimitWindow> windows;   // last known limits (kept when a fetch fails)
-    std::string notice;                 // why the limits may be stale; empty when fine
+    NoticeKind noticeKind = NoticeKind::None;
+    std::string notice;                 // one-line title for noticeKind; empty when fine
+    int httpStatus = 0;                 // for BadResponse
+    int64_t retryAt = 0;                // for RateLimited: when Usage? checks again
     Account account;
     CostSummary cost;
     StorageInfo storage;
@@ -46,6 +60,9 @@ int64_t weeklyWindowEnd(const std::vector<LimitWindow>& windows, int64_t now);
 
 // Session window (or the first window) shown in the menu bar; nullptr if none.
 const LimitWindow* primaryWindow(const std::vector<LimitWindow>& windows);
+
+// What to do about a notice, in one line for the command line ("" when there's nothing to do).
+std::string noticeHint(NoticeKind kind);
 
 std::string snapshotJSON(const Snapshot& s, int64_t now);
 std::string snapshotText(const Snapshot& s, int64_t now);
